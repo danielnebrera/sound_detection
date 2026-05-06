@@ -2,28 +2,22 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
+  * @brief          : Main program body with audio capture
   ******************************************************************************
   */
 /* USER CODE END Header */
+
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "dma.h"
 #include "sai.h"
 #include "gpio.h"
+#include "audio_capture.h"
+#include "uart_driver.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "stm32h7xx_hal_pwr_ex.h"
 
 /* USER CODE END Includes */
 
@@ -35,11 +29,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-/* DUAL_CORE_BOOT_SYNC_SEQUENCE: Define for dual core boot synchronization    */
-/*                             demonstration code based on hardware semaphore */
-/* This define is present in both CM7/CM4 projects                            */
-/* To comment when developping/debugging on a single core                     */
-//#define DUAL_CORE_BOOT_SYNC_SEQUENCE
+#define DUAL_CORE_BOOT_SYNC_SEQUENCE
 
 #if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
 #ifndef HSEM_ID_0
@@ -57,19 +47,14 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-// Preparar buffers DMA
-#define AUDIO_DMA_BUF_LEN  512
 
-uint32_t sai_rx_a[AUDIO_DMA_BUF_LEN];
-uint32_t sai_rx_b[AUDIO_DMA_BUF_LEN];
-
-volatile uint8_t sai_half_complete = 0;
-volatile uint8_t sai_full_complete = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
-/* USER CODE BEGIN PFP */
 void PeriphCommonClock_Config(void);
+
+/* USER CODE BEGIN PFP */
+void audio_test_print_stats(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -81,6 +66,8 @@ void PeriphCommonClock_Config(void);
   * @brief  The application entry point.
   * @retval int
   */
+
+
 int main(void)
 {
 
@@ -105,6 +92,7 @@ int main(void)
 
 #endif /* DUAL_CORE_BOOT_SYNC_SEQUENCE */
 /* USER CODE END Boot_Mode_Sequence_1 */
+
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
@@ -121,37 +109,68 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
+  PeriphCommonClock_Config();  // PLL3 for SAI clock
+  uart_init();
   MX_SAI1_Init();
+  
   /* USER CODE BEGIN 2 */
-  // Arrancar DMA
-  if (HAL_SAI_Receive_DMA(&hsai_BlockA1, (uint8_t *)sai_rx_a, AUDIO_DMA_BUF_LEN) != HAL_OK)
-    {
+  
+  /* Initialize audio capture */
+  if (audio_capture_init(&g_audio_ctx) != 0)
+  {
       Error_Handler();
-    }
-
-    if (HAL_SAI_Receive_DMA(&hsai_BlockB1, (uint8_t *)sai_rx_b, AUDIO_DMA_BUF_LEN) != HAL_OK)
-    {
+  }
+  
+  if (audio_capture_start(&g_audio_ctx) != 0)
+  {
       Error_Handler();
-    }
+  }
+  
+  /* Pequeño delay para que UART se estabilice */
+  HAL_Delay(100);
+  
+  printf("\n\n");
+  printf("=== Audio Capture Started ===\n");
+  printf("Sample Rate: %d Hz\n", AUDIO_SAMPLE_RATE);
+  printf("Channels: %d\n", AUDIO_CHANNELS);
+  printf("Buffer Size: %d samples\n", AUDIO_BUFFER_SIZE);
+  printf("DMA Buffer Size: %d samples\n\n", AUDIO_DMA_BUFFER_SIZE);
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  uint32_t sample_count = 0;
+  
   while (1)
   {
-	  if (sai_half_complete)
-	      {
-	        sai_half_complete = 0;
-	      }
-	        /* Aquí luego procesaremos la primera mitad del buffer */
-
-	      if (sai_full_complete)
-	      {
-	        sai_full_complete = 0;
-
-	        /* Aquí luego procesaremos la segunda mitad del buffer */
-	      }
+      /* Poll for new audio data */
+      AudioBufferState state = audio_capture_get_data(&g_audio_ctx);
+      
+      if (state == AUDIO_BUFFER_HALF || state == AUDIO_BUFFER_FULL)
+      {
+          sample_count += AUDIO_BUFFER_SIZE;
+          
+          /* Print stats every 44100 samples (~1 second at 44.1kHz) */
+          if (sample_count >= AUDIO_SAMPLE_RATE)
+          {
+              sample_count = 0;
+              audio_test_print_stats();
+          }
+          
+          /* TODO: Process audio here
+           * 
+           * int32_t *mic1 = audio_capture_get_channel(&g_audio_ctx, 0);
+           * int32_t *mic2 = audio_capture_get_channel(&g_audio_ctx, 1);
+           * int32_t *mic3 = audio_capture_get_channel(&g_audio_ctx, 2);
+           * int32_t *mic4 = audio_capture_get_channel(&g_audio_ctx, 3);
+           * 
+           * // Process MFCC, TDOA, etc.
+           * mfcc_compute(mic1, AUDIO_BUFFER_SIZE);
+           * gcc_phat_compute(mic1, mic2, ...);
+           */
+      }
+      
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -186,28 +205,30 @@ void PeriphCommonClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-// DMA Callbacks
-void HAL_SAI_RxHalfCpltCallback(SAI_HandleTypeDef *hsai)
+
+/**
+ * @brief Print audio statistics (for debugging)
+ */
+void audio_test_print_stats(void)
 {
-  if ((hsai == &hsai_BlockA1) || (hsai == &hsai_BlockB1))
-  {
-    sai_half_complete = 1;
-  }
+    uint32_t frames = 0, errors = 0;
+    audio_capture_get_stats(&g_audio_ctx, &frames, &errors);
+    
+    printf("[AUDIO] Frames: %lu | Errors: %lu\n", frames, errors);
+    
+    /* Optional: Print first few samples of each channel */
+    int32_t *ch0 = audio_capture_get_channel(&g_audio_ctx, 0);
+    int32_t *ch1 = audio_capture_get_channel(&g_audio_ctx, 1);
+    int32_t *ch2 = audio_capture_get_channel(&g_audio_ctx, 2);
+    int32_t *ch3 = audio_capture_get_channel(&g_audio_ctx, 3);
+    
+    if (ch0 && ch1 && ch2 && ch3)
+    {
+        printf("  Mic1[0]: %ld | Mic2[0]: %ld | Mic3[0]: %ld | Mic4[0]: %ld\n",
+               ch0[0], ch1[0], ch2[0], ch3[0]);
+    }
 }
 
-void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai)
-{
-  if ((hsai == &hsai_BlockA1) || (hsai == &hsai_BlockB1))
-  {
-    sai_full_complete = 1;
-  }
-}
-
-void HAL_SAI_ErrorCallback(SAI_HandleTypeDef *hsai)
-{
-  (void)hsai;
-  Error_Handler();
-}
 /* USER CODE END 4 */
 
 /**
@@ -224,6 +245,7 @@ void Error_Handler(void)
   }
   /* USER CODE END Error_Handler_Debug */
 }
+
 #ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
