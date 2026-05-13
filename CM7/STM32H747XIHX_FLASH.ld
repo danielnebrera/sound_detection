@@ -177,6 +177,15 @@ SECTIONS
     . = ALIGN(8);
   } >RAM_D1
 
+	/* Buffers DMA en RAM_D2 - accesible por DMA1 */
+	.RAM_D2_bss (NOLOAD) :
+	{
+	  . = ALIGN(4);
+	  *(.RAM_D2_bss)
+	  *(.RAM_D2_bss*)
+	  . = ALIGN(4);
+	} >RAM_D2
+
   /* Remove information from the compiler libraries */
   /DISCARD/ :
   {

@@ -2,95 +2,100 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
+  * @brief          : Main program body with audio capture on CM7
   ******************************************************************************
   */
 /* USER CODE END Header */
 
 #include "main.h"
 #include "dma.h"
+#include "sai.h"
 #include "gpio.h"
 
-/* USER CODE BEGIN PD */
-#define DUAL_CORE_BOOT_SYNC_SEQUENCE
+/* USER CODE BEGIN Includes */
+#include "audio_capture.h"
+#include "uart_driver.h"
+#include "flash_logger.h"
+#include "stm32h7xx.h"
+/* USER CODE END Includes */
 
-#if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
-#ifndef HSEM_ID_0
-#define HSEM_ID_0 (0U)
-#endif
-#endif
+/* USER CODE BEGIN PD */
+//#define DUAL_CORE_BOOT_SYNC_SEQUENCE
 /* USER CODE END PD */
 
 void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
 static void MPU_Config(void);
+void audio_test_print_stats(void);
+
+/* LEDs con logica invertida */
+#define LED_ON(pin)     HAL_GPIO_WritePin(GPIOK, pin, GPIO_PIN_RESET)
+#define LED_OFF(pin)    HAL_GPIO_WritePin(GPIOK, pin, GPIO_PIN_SET)
+#define LED_TOGGLE(pin) HAL_GPIO_TogglePin(GPIOK, pin)
 
 int main(void)
 {
-  /* USER CODE BEGIN 1 */
-  // SCB->VTOR = 0x08040000;  <- NUNCA descomentar esto
-  /* USER CODE END 1 */
-
-/* USER CODE BEGIN Boot_Mode_Sequence_0 */
-#if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
-  int32_t timeout;
-#endif
-/* USER CODE END Boot_Mode_Sequence_0 */
-
   MPU_Config();
-
-/* USER CODE BEGIN Boot_Mode_Sequence_1 */
-#if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
-  /* Esperar que CM4 entre en STOP mode — sin Error_Handler si hay timeout */
-  timeout = 0xFFFFFF;
-  while((__HAL_RCC_GET_FLAG(RCC_FLAG_D2CKRDY) != RESET) && (timeout-- > 0));
-  /* Continúa sin importar si hubo timeout */
-#endif
-/* USER CODE END Boot_Mode_Sequence_1 */
 
   HAL_Init();
   HAL_RCC_DeInit();
   SystemClock_Config();
   PeriphCommonClock_Config();
 
-/* USER CODE BEGIN Boot_Mode_Sequence_2 */
-#if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
-  /* Liberar CM4 vía HSEM */
-  __HAL_RCC_HSEM_CLK_ENABLE();
-  HAL_HSEM_FastTake(HSEM_ID_0);
-  HAL_HSEM_Release(HSEM_ID_0, 0);
-
-  /* Esperar que CM4 despierte — sin Error_Handler si hay timeout */
-  timeout = 0xFFFFFF;
-  while((__HAL_RCC_GET_FLAG(RCC_FLAG_D2CKRDY) == RESET) && (timeout-- > 0));
-  /* Continúa sin importar si hubo timeout */
-#endif
-/* USER CODE END Boot_Mode_Sequence_2 */
-
   MX_GPIO_Init();
   MX_DMA_Init();
 
-  /* USER CODE BEGIN 2 */
-  int contador = 0;
-  /* USER CODE END 2 */
+  /* Apagar todos los LEDs */
+  LED_OFF(GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7);
+
+  flash_logger_init();
+  flash_logger_clear();
+  flash_log("CM7: arranco OK\n");
+
+  uart_init();
+  MX_SAI1_Init();
+  flash_log("CM7: SAI OK\n");
+
+  if (audio_capture_init(&g_audio_ctx) != 0)
+  {
+      flash_log("CM7: ERROR audio_capture_init\n");
+      while(1) { LED_TOGGLE(GPIO_PIN_7); HAL_Delay(500); }
+  }
+  flash_log("CM7: audio_capture_init OK\n");
+
+  int result = audio_capture_start(&g_audio_ctx);
+  if (result != 0)
+  {
+      flash_log("CM7: ERROR audio_capture_start\n");
+      if (result == -1)
+          while(1) { LED_TOGGLE(GPIO_PIN_5); HAL_Delay(500); } /* Rojo = SAI_A */
+      else
+          while(1) { LED_TOGGLE(GPIO_PIN_7); HAL_Delay(500); } /* Azul = SAI_B */
+  }
+  flash_log("CM7: audio_capture_start OK\n");
+
+  LED_OFF(GPIO_PIN_5);
+  LED_OFF(GPIO_PIN_6);
+  LED_OFF(GPIO_PIN_7);
+
+  uint32_t sample_count = 0;
 
   while (1)
   {
-    if(contador == 4){
-      contador = 0;
-      HAL_GPIO_WritePin(LED_BLUE_GPIO_Port, LED_BLUE_Pin, RESET);
-    }
-    else HAL_GPIO_WritePin(LED_BLUE_GPIO_Port, LED_BLUE_Pin, SET);
+      AudioBufferState state = audio_capture_get_data(&g_audio_ctx);
 
-    HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, RESET);
-    HAL_Delay(5000);
-    HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, RESET);
-    HAL_Delay(1000);
-    HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, RESET);
-    HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, SET);
-    HAL_Delay(7000);
-    contador++;
-    HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, SET);
+      if (state == AUDIO_BUFFER_HALF || state == AUDIO_BUFFER_FULL)
+      {
+          sample_count += AUDIO_BUFFER_SIZE;
+          LED_TOGGLE(GPIO_PIN_5); /* Rojo parpadea cada buffer */
+
+          if (sample_count >= AUDIO_SAMPLE_RATE)
+          {
+              sample_count = 0;
+              LED_TOGGLE(GPIO_PIN_6); /* Verde parpadea cada segundo */
+              audio_test_print_stats();
+          }
+      }
   }
 }
 
@@ -143,7 +148,28 @@ void PeriphCommonClock_Config(void)
   PeriphClkInitStruct.PLL3.PLL3VCOSEL = RCC_PLL3VCOWIDE;
   PeriphClkInitStruct.PLL3.PLL3FRACN = 2077;
   PeriphClkInitStruct.Sai1ClockSelection = RCC_SAI1CLKSOURCE_PLL3;
-  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK) Error_Handler();
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
+  {
+      while(1) { LED_TOGGLE(GPIO_PIN_6); HAL_Delay(100); }
+  }
+}
+
+void audio_test_print_stats(void)
+{
+    uint32_t frames = 0, errors = 0;
+    audio_capture_get_stats(&g_audio_ctx, &frames, &errors);
+    printf("[AUDIO] Frames: %lu | Errors: %lu\n", frames, errors);
+
+    int32_t *ch0 = audio_capture_get_channel(&g_audio_ctx, 0);
+    int32_t *ch1 = audio_capture_get_channel(&g_audio_ctx, 1);
+    int32_t *ch2 = audio_capture_get_channel(&g_audio_ctx, 2);
+    int32_t *ch3 = audio_capture_get_channel(&g_audio_ctx, 3);
+
+    if (ch0 && ch1 && ch2 && ch3)
+    {
+        printf("  Mic1[0]: %ld | Mic2[0]: %ld | Mic3[0]: %ld | Mic4[0]: %ld\n",
+               ch0[0], ch1[0], ch2[0], ch3[0]);
+    }
 }
 
 void MPU_Config(void)
@@ -167,8 +193,15 @@ void MPU_Config(void)
 
 void Error_Handler(void)
 {
-  __disable_irq();
-  while (1) {}
+  while(1)
+  {
+      LED_TOGGLE(GPIO_PIN_5);
+      LED_OFF(GPIO_PIN_7);
+      HAL_Delay(500);
+      LED_OFF(GPIO_PIN_5);
+      LED_TOGGLE(GPIO_PIN_7);
+      HAL_Delay(500);
+  }
 }
 
 #ifdef USE_FULL_ASSERT
