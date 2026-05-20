@@ -106,18 +106,18 @@ int _write(int file, char *ptr, int len)
 {
     (void)file;
 
-    if (LOG_REGION->magic != FLASH_LOG_MAGIC) flash_logger_init();
+    /* Solo escribir al ITM si el debugger lo habilitó */
+    if ((CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk) == 0) return len;
+    if ((ITM->TCR & ITM_TCR_ITMENA_Msk) == 0) return len;
+    if ((ITM->TER & 1UL) == 0) return len;
 
-    uint32_t pos = LOG_REGION->write_pos;
-    uint32_t available = sizeof(LOG_REGION->data) - pos;
-
-    uint32_t to_write = (uint32_t)len;
-    if (to_write > available) to_write = available;
-
-    if (to_write > 0)
+    for (int i = 0; i < len; i++)
     {
-        memcpy((void*)&LOG_REGION->data[pos], ptr, to_write);
-        LOG_REGION->write_pos += to_write;
+        /* Timeout en lugar de loop infinito */
+        uint32_t timeout = 10000;
+        while (ITM->PORT[0].u32 == 0 && timeout-- > 0) {}
+        if (timeout > 0)
+            ITM->PORT[0].u8 = (uint8_t)ptr[i];
     }
 
     return len;
