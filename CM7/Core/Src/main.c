@@ -10,6 +10,7 @@
 #include "main.h"
 #include "dma.h"
 #include "sai.h"
+#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -54,10 +55,6 @@ static void MPU_Config(void);
 
 /* USER CODE END 0 */
 
-/**
-  * @brief  The application entry point.
-  * @retval int
-  */
 int main(void)
 {
   /* USER CODE BEGIN 1 */
@@ -82,6 +79,9 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+  MX_USART1_UART_Init();
+  HAL_UART_Transmit(&huart1, (uint8_t*)"UART_INIT_OK\r\n", 14, 100);
+  HAL_UART_Transmit(&huart1, (uint8_t*)"BOOT\r\n", 6, 100);
   /* USER CODE END Init */
 
   SystemClock_Config();
@@ -104,43 +104,35 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_SAI1_Init();
+  MX_USART1_UART_Init();
 
   /* USER CODE BEGIN 2 */
   LED_OFF(GPIO_PIN_5);
   LED_OFF(GPIO_PIN_6);
   LED_OFF(GPIO_PIN_7);
 
-  /* Habilitar ITM canal 0 para que printf llegue al SWV ITM Data Console */
-  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-  ITM->LAR  = 0xC5ACCE55;
-  ITM->TCR |= ITM_TCR_ITMENA_Msk;
-  ITM->TER |= 1UL;
+  printf("CM7: arranque OK\r\n");
 
-  printf("CM7: arranque OK\n");
-
-  /* Inicializar audio capture */
   if (audio_capture_init(&g_audio_ctx) != 0)
   {
-    printf("CM7: ERROR audio_capture_init\n");
+    printf("CM7: ERROR audio_capture_init\r\n");
     while(1) { LED_TOGGLE(GPIO_PIN_7); HAL_Delay(500); }
   }
-  printf("CM7: audio_capture_init OK\n");
+  printf("CM7: audio_capture_init OK\r\n");
 
-  /* Arrancar DMA */
   int result = audio_capture_start(&g_audio_ctx);
   if (result != 0)
   {
-    printf("CM7: ERROR audio_capture_start result=%d\n", result);
+    printf("CM7: ERROR audio_capture_start result=%d\r\n", result);
     while(1) { LED_TOGGLE(GPIO_PIN_5); HAL_Delay(200); }
   }
-  printf("CM7: audio_capture_start OK\n");
+  printf("CM7: audio_capture_start OK\r\n");
 
-  /* Verificar estado SAI */
   HAL_Delay(100);
   if (hsai_BlockA1.State == HAL_SAI_STATE_BUSY_RX)
-    printf("CM7: SAI BUSY_RX OK\n");
+    printf("CM7: SAI BUSY_RX OK\r\n");
   else
-    printf("CM7: SAI NO esta en BUSY_RX\n");
+    printf("CM7: SAI NO esta en BUSY_RX\r\n");
 
   LED_OFF(GPIO_PIN_5);
   LED_OFF(GPIO_PIN_6);
@@ -168,7 +160,7 @@ int main(void)
 
         uint32_t frames = 0, errors = 0;
         audio_capture_get_stats(&g_audio_ctx, &frames, &errors);
-        printf("[AUDIO] frames=%lu errors=%lu\n", frames, errors);
+        printf("[AUDIO] frames=%lu errors=%lu\r\n", frames, errors);
 
         int32_t *ch0 = audio_capture_get_channel(&g_audio_ctx, 0);
         int32_t *ch1 = audio_capture_get_channel(&g_audio_ctx, 1);
@@ -177,7 +169,7 @@ int main(void)
 
         if (ch0 && ch1 && ch2 && ch3)
         {
-          printf("  Mic1=%ld Mic2=%ld Mic3=%ld Mic4=%ld\n",
+          printf("  Mic1=%ld Mic2=%ld Mic3=%ld Mic4=%ld\r\n",
                  ch0[0], ch1[0], ch2[0], ch3[0]);
         }
       }
@@ -189,25 +181,45 @@ int main(void)
 
 /**
   * @brief System Clock Configuration
-  * @retval None
+  * CORREGIDO para Portenta H7 sin bootloader Arduino:
+  * - SCALE1 (400MHz) — PMIC sin I2C no entrega voltaje para SCALE0
+  * - PH1 HIGH para encender oscilador externo activo
+  * - RCC_HSE_BYPASS — oscilador activo, no cristal pasivo
   */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
 
+  /* 1. SCALE1 — PMIC sin inicializacion I2C no entrega voltaje para SCALE0 */
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
-
-  /* SCALE0 requerido para operar a 480MHz */
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE0);
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  /* 2. Encender oscilador externo activo via pin PH1 */
+  /* USER CODE BEGIN SystemClock_OSC_Enable */
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
+  HAL_GPIO_WritePin(GPIOH, GPIO_PIN_1, GPIO_PIN_SET);
+  /* Esperar estabilizacion sin HAL_Delay (SysTick puede no estar listo) */
+  for(volatile uint32_t i = 0; i < 500000; i++) {}
+  /* USER CODE END SystemClock_OSC_Enable */
+
+  /* 3. HSE BYPASS — oscilador activo de 25MHz */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
+  RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  /* 25MHz / 5 * 160 / 2 = 400MHz */
   RCC_OscInitStruct.PLL.PLLM = 5;
-  RCC_OscInitStruct.PLL.PLLN = 192;
+  RCC_OscInitStruct.PLL.PLLN = 160;
   RCC_OscInitStruct.PLL.PLLP = 2;
   RCC_OscInitStruct.PLL.PLLQ = 2;
   RCC_OscInitStruct.PLL.PLLR = 2;
@@ -216,6 +228,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLFRACN = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) { Error_Handler(); }
 
+  /* 4. Configurar buses */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
                               | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2
                               | RCC_CLOCKTYPE_D3PCLK1 | RCC_CLOCKTYPE_D1PCLK1;
@@ -231,11 +244,12 @@ void SystemClock_Config(void)
 
 /**
   * @brief Peripherals Common Clock Configuration
-  * @retval None
+  * PLL3 para SAI1 — misma fuente HSE 25MHz BYPASS
   */
 void PeriphCommonClock_Config(void)
 {
   RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
+
   PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_SAI1;
   PeriphClkInitStruct.PLL3.PLL3M = 5;
   PeriphClkInitStruct.PLL3.PLL3N = 72;
@@ -252,70 +266,63 @@ void PeriphCommonClock_Config(void)
 /* USER CODE BEGIN 4 */
 /* USER CODE END 4 */
 
- /* MPU Configuration */
 void MPU_Config(void)
 {
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
   HAL_MPU_Disable();
 
-  /* Region 0: bloquear acceso por defecto a todo el espacio de 4GB
-     SubRegionDisable=0x87 excluye regiones 0,1,2,7 — permite acceso
-     a perifericos y memoria del sistema */
-  MPU_InitStruct.Enable             = MPU_REGION_ENABLE;
-  MPU_InitStruct.Number             = MPU_REGION_NUMBER0;
-  MPU_InitStruct.BaseAddress        = 0x00000000;
-  MPU_InitStruct.Size               = MPU_REGION_SIZE_4GB;
-  MPU_InitStruct.SubRegionDisable   = 0x87;
-  MPU_InitStruct.TypeExtField       = MPU_TEX_LEVEL0;
-  MPU_InitStruct.AccessPermission   = MPU_REGION_NO_ACCESS;
-  MPU_InitStruct.DisableExec        = MPU_INSTRUCTION_ACCESS_DISABLE;
-  MPU_InitStruct.IsShareable        = MPU_ACCESS_SHAREABLE;
-  MPU_InitStruct.IsCacheable        = MPU_ACCESS_NOT_CACHEABLE;
-  MPU_InitStruct.IsBufferable       = MPU_ACCESS_NOT_BUFFERABLE;
+  MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
+  MPU_InitStruct.Number           = MPU_REGION_NUMBER0;
+  MPU_InitStruct.BaseAddress      = 0x00000000;
+  MPU_InitStruct.Size             = MPU_REGION_SIZE_4GB;
+  MPU_InitStruct.SubRegionDisable = 0x87;
+  MPU_InitStruct.TypeExtField     = MPU_TEX_LEVEL0;
+  MPU_InitStruct.AccessPermission = MPU_REGION_NO_ACCESS;
+  MPU_InitStruct.DisableExec      = MPU_INSTRUCTION_ACCESS_DISABLE;
+  MPU_InitStruct.IsShareable      = MPU_ACCESS_SHAREABLE;
+  MPU_InitStruct.IsCacheable      = MPU_ACCESS_NOT_CACHEABLE;
+  MPU_InitStruct.IsBufferable     = MPU_ACCESS_NOT_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
   /* USER CODE BEGIN MPU_Config_Extra */
 
-  /* Region 1: RAM_D1 (0x24000000, 512KB) - heap y datos del programa */
-  MPU_InitStruct.Enable             = MPU_REGION_ENABLE;
-  MPU_InitStruct.Number             = MPU_REGION_NUMBER1;
-  MPU_InitStruct.BaseAddress        = 0x24000000;
-  MPU_InitStruct.Size               = MPU_REGION_SIZE_512KB;
-  MPU_InitStruct.SubRegionDisable   = 0x00;
-  MPU_InitStruct.TypeExtField       = MPU_TEX_LEVEL1;
-  MPU_InitStruct.AccessPermission   = MPU_REGION_FULL_ACCESS;
-  MPU_InitStruct.DisableExec        = MPU_INSTRUCTION_ACCESS_DISABLE;
-  MPU_InitStruct.IsShareable        = MPU_ACCESS_NOT_SHAREABLE;
-  MPU_InitStruct.IsCacheable        = MPU_ACCESS_CACHEABLE;
-  MPU_InitStruct.IsBufferable       = MPU_ACCESS_BUFFERABLE;
+  MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
+  MPU_InitStruct.Number           = MPU_REGION_NUMBER1;
+  MPU_InitStruct.BaseAddress      = 0x24000000;
+  MPU_InitStruct.Size             = MPU_REGION_SIZE_512KB;
+  MPU_InitStruct.SubRegionDisable = 0x00;
+  MPU_InitStruct.TypeExtField     = MPU_TEX_LEVEL1;
+  MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
+  MPU_InitStruct.DisableExec      = MPU_INSTRUCTION_ACCESS_DISABLE;
+  MPU_InitStruct.IsShareable      = MPU_ACCESS_NOT_SHAREABLE;
+  MPU_InitStruct.IsCacheable      = MPU_ACCESS_CACHEABLE;
+  MPU_InitStruct.IsBufferable     = MPU_ACCESS_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
-  /* Region 2: DTCMRAM (0x20000000, 128KB) - stack del CM7 */
-  MPU_InitStruct.Enable             = MPU_REGION_ENABLE;
-  MPU_InitStruct.Number             = MPU_REGION_NUMBER2;
-  MPU_InitStruct.BaseAddress        = 0x20000000;
-  MPU_InitStruct.Size               = MPU_REGION_SIZE_128KB;
-  MPU_InitStruct.SubRegionDisable   = 0x00;
-  MPU_InitStruct.TypeExtField       = MPU_TEX_LEVEL1;
-  MPU_InitStruct.AccessPermission   = MPU_REGION_FULL_ACCESS;
-  MPU_InitStruct.DisableExec        = MPU_INSTRUCTION_ACCESS_DISABLE;
-  MPU_InitStruct.IsShareable        = MPU_ACCESS_NOT_SHAREABLE;
-  MPU_InitStruct.IsCacheable        = MPU_ACCESS_CACHEABLE;
-  MPU_InitStruct.IsBufferable       = MPU_ACCESS_BUFFERABLE;
+  MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
+  MPU_InitStruct.Number           = MPU_REGION_NUMBER2;
+  MPU_InitStruct.BaseAddress      = 0x20000000;
+  MPU_InitStruct.Size             = MPU_REGION_SIZE_128KB;
+  MPU_InitStruct.SubRegionDisable = 0x00;
+  MPU_InitStruct.TypeExtField     = MPU_TEX_LEVEL1;
+  MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
+  MPU_InitStruct.DisableExec      = MPU_INSTRUCTION_ACCESS_DISABLE;
+  MPU_InitStruct.IsShareable      = MPU_ACCESS_NOT_SHAREABLE;
+  MPU_InitStruct.IsCacheable      = MPU_ACCESS_CACHEABLE;
+  MPU_InitStruct.IsBufferable     = MPU_ACCESS_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
-  /* Region 3: FLASH CM7 (0x08040000, 1216KB) - codigo ejecutable */
-  MPU_InitStruct.Enable             = MPU_REGION_ENABLE;
-  MPU_InitStruct.Number             = MPU_REGION_NUMBER3;
-  MPU_InitStruct.BaseAddress        = 0x08040000;
-  MPU_InitStruct.Size               = MPU_REGION_SIZE_1MB;
-  MPU_InitStruct.SubRegionDisable   = 0x00;
-  MPU_InitStruct.TypeExtField       = MPU_TEX_LEVEL0;
-  MPU_InitStruct.AccessPermission   = MPU_REGION_FULL_ACCESS;
-  MPU_InitStruct.DisableExec        = MPU_INSTRUCTION_ACCESS_ENABLE;
-  MPU_InitStruct.IsShareable        = MPU_ACCESS_NOT_SHAREABLE;
-  MPU_InitStruct.IsCacheable        = MPU_ACCESS_CACHEABLE;
-  MPU_InitStruct.IsBufferable       = MPU_ACCESS_NOT_BUFFERABLE;
+  MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
+  MPU_InitStruct.Number           = MPU_REGION_NUMBER3;
+  MPU_InitStruct.BaseAddress      = 0x08040000;
+  MPU_InitStruct.Size             = MPU_REGION_SIZE_1MB;
+  MPU_InitStruct.SubRegionDisable = 0x00;
+  MPU_InitStruct.TypeExtField     = MPU_TEX_LEVEL0;
+  MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
+  MPU_InitStruct.DisableExec      = MPU_INSTRUCTION_ACCESS_ENABLE;
+  MPU_InitStruct.IsShareable      = MPU_ACCESS_NOT_SHAREABLE;
+  MPU_InitStruct.IsCacheable      = MPU_ACCESS_CACHEABLE;
+  MPU_InitStruct.IsBufferable     = MPU_ACCESS_NOT_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
   /* USER CODE END MPU_Config_Extra */
@@ -330,9 +337,9 @@ void Error_Handler(void)
   while(1)
   {
     HAL_GPIO_TogglePin(GPIOK, GPIO_PIN_5);
-    HAL_Delay(200);
+    for(volatile uint32_t i = 0; i < 1000000; i++) {}
     HAL_GPIO_TogglePin(GPIOK, GPIO_PIN_7);
-    HAL_Delay(200);
+    for(volatile uint32_t i = 0; i < 1000000; i++) {}
   }
   /* USER CODE END Error_Handler_Debug */
 }
