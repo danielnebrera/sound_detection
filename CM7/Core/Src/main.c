@@ -137,54 +137,27 @@ int main(void)
   LED_OFF(GPIO_PIN_5);
   LED_OFF(GPIO_PIN_6);
   LED_OFF(GPIO_PIN_7);
+  printf("CM7: entrando al loop\r\n");
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN WHILE */
-  uint32_t sample_count = 0;
   while (1)
   {
     /* USER CODE END WHILE */
     /* USER CODE BEGIN 3 */
-
-    AudioBufferState state = audio_capture_get_data(&g_audio_ctx);
-
-    if (state == AUDIO_BUFFER_HALF || state == AUDIO_BUFFER_FULL)
+    static uint32_t last_print = 0;
+    uint32_t now = HAL_GetTick();
+    if (now - last_print > 2000)
     {
-      sample_count += AUDIO_BUFFER_SIZE;
-      LED_TOGGLE(GPIO_PIN_5);
-
-      if (sample_count >= AUDIO_SAMPLE_RATE)
-      {
-        sample_count = 0;
-        LED_TOGGLE(GPIO_PIN_6);
-
-        uint32_t frames = 0, errors = 0;
-        audio_capture_get_stats(&g_audio_ctx, &frames, &errors);
-        printf("[AUDIO] frames=%lu errors=%lu\r\n", frames, errors);
-
-        int32_t *ch0 = audio_capture_get_channel(&g_audio_ctx, 0);
-        int32_t *ch1 = audio_capture_get_channel(&g_audio_ctx, 1);
-        int32_t *ch2 = audio_capture_get_channel(&g_audio_ctx, 2);
-        int32_t *ch3 = audio_capture_get_channel(&g_audio_ctx, 3);
-
-        if (ch0 && ch1 && ch2 && ch3)
-        {
-          printf("  Mic1=%ld Mic2=%ld Mic3=%ld Mic4=%ld\r\n",
-                 ch0[0], ch1[0], ch2[0], ch3[0]);
-        }
-      }
+        last_print = now;
+        printf("tick=%lu\r\n", now);
     }
-
+    /* USER CODE END 3 */
   }
-  /* USER CODE END 3 */
 }
 
 /**
   * @brief System Clock Configuration
-  * CORREGIDO para Portenta H7 sin bootloader Arduino:
-  * - SCALE1 (400MHz) — PMIC sin I2C no entrega voltaje para SCALE0
-  * - PH1 HIGH para encender oscilador externo activo
-  * - RCC_HSE_BYPASS — oscilador activo, no cristal pasivo
   */
 void SystemClock_Config(void)
 {
@@ -192,12 +165,10 @@ void SystemClock_Config(void)
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-  /* 1. SCALE1 — PMIC sin inicializacion I2C no entrega voltaje para SCALE0 */
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
-  /* 2. Encender oscilador externo activo via pin PH1 */
   /* USER CODE BEGIN SystemClock_OSC_Enable */
   __HAL_RCC_GPIOH_CLK_ENABLE();
   GPIO_InitStruct.Pin = GPIO_PIN_1;
@@ -206,18 +177,15 @@ void SystemClock_Config(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
   HAL_GPIO_WritePin(GPIOH, GPIO_PIN_1, GPIO_PIN_SET);
-  /* Esperar estabilizacion sin HAL_Delay (SysTick puede no estar listo) */
   for(volatile uint32_t i = 0; i < 500000; i++) {}
   /* USER CODE END SystemClock_OSC_Enable */
 
-  /* 3. HSE BYPASS — oscilador activo de 25MHz */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
   RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  /* 25MHz / 5 * 160 / 2 = 400MHz */
   RCC_OscInitStruct.PLL.PLLM = 5;
   RCC_OscInitStruct.PLL.PLLN = 160;
   RCC_OscInitStruct.PLL.PLLP = 2;
@@ -228,7 +196,6 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLFRACN = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) { Error_Handler(); }
 
-  /* 4. Configurar buses */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
                               | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2
                               | RCC_CLOCKTYPE_D3PCLK1 | RCC_CLOCKTYPE_D1PCLK1;
@@ -244,12 +211,10 @@ void SystemClock_Config(void)
 
 /**
   * @brief Peripherals Common Clock Configuration
-  * PLL3 para SAI1 — misma fuente HSE 25MHz BYPASS
   */
 void PeriphCommonClock_Config(void)
 {
   RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
-
   PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_SAI1;
   PeriphClkInitStruct.PLL3.PLL3M = 5;
   PeriphClkInitStruct.PLL3.PLL3N = 72;
@@ -286,6 +251,7 @@ void MPU_Config(void)
 
   /* USER CODE BEGIN MPU_Config_Extra */
 
+  /* Region 1: RAM_D1 — cacheable para arranque correcto */
   MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
   MPU_InitStruct.Number           = MPU_REGION_NUMBER1;
   MPU_InitStruct.BaseAddress      = 0x24000000;
@@ -299,6 +265,7 @@ void MPU_Config(void)
   MPU_InitStruct.IsBufferable     = MPU_ACCESS_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
+  /* Region 2: DTCMRAM — cacheable para arranque correcto */
   MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
   MPU_InitStruct.Number           = MPU_REGION_NUMBER2;
   MPU_InitStruct.BaseAddress      = 0x20000000;
@@ -312,6 +279,7 @@ void MPU_Config(void)
   MPU_InitStruct.IsBufferable     = MPU_ACCESS_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
+  /* Region 3: FLASH CM7 */
   MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
   MPU_InitStruct.Number           = MPU_REGION_NUMBER3;
   MPU_InitStruct.BaseAddress      = 0x08040000;
