@@ -141,19 +141,43 @@ int main(void)
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN WHILE */
+  uint32_t sample_count = 0;
   while (1)
   {
     /* USER CODE END WHILE */
     /* USER CODE BEGIN 3 */
-    static uint32_t last_print = 0;
-    uint32_t now = HAL_GetTick();
-    if (now - last_print > 2000)
+
+    AudioBufferState state = audio_capture_get_data(&g_audio_ctx);
+
+    if (state == AUDIO_BUFFER_HALF || state == AUDIO_BUFFER_FULL)
     {
-        last_print = now;
-        printf("tick=%lu\r\n", now);
+      sample_count += AUDIO_BUFFER_SIZE;
+      LED_TOGGLE(GPIO_PIN_5);
+
+      if (sample_count >= AUDIO_SAMPLE_RATE)
+      {
+        sample_count = 0;
+        LED_TOGGLE(GPIO_PIN_6);
+
+        uint32_t frames = 0, errors = 0;
+        audio_capture_get_stats(&g_audio_ctx, &frames, &errors);
+        printf("[AUDIO] frames=%lu errors=%lu\r\n", frames, errors);
+
+        int32_t *ch0 = audio_capture_get_channel(&g_audio_ctx, 0);
+        int32_t *ch1 = audio_capture_get_channel(&g_audio_ctx, 1);
+        int32_t *ch2 = audio_capture_get_channel(&g_audio_ctx, 2);
+        int32_t *ch3 = audio_capture_get_channel(&g_audio_ctx, 3);
+
+        if (ch0 && ch1 && ch2 && ch3)
+        {
+          printf("  Mic1=%ld Mic2=%ld Mic3=%ld Mic4=%ld\r\n",
+                 ch0[0], ch1[0], ch2[0], ch3[0]);
+        }
+      }
     }
-    /* USER CODE END 3 */
+
   }
+  /* USER CODE END 3 */
 }
 
 /**
@@ -251,7 +275,7 @@ void MPU_Config(void)
 
   /* USER CODE BEGIN MPU_Config_Extra */
 
-  /* Region 1: RAM_D1 — cacheable para arranque correcto */
+  /* Region 1: RAM_D1 (0x24000000, 512KB) */
   MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
   MPU_InitStruct.Number           = MPU_REGION_NUMBER1;
   MPU_InitStruct.BaseAddress      = 0x24000000;
@@ -265,7 +289,7 @@ void MPU_Config(void)
   MPU_InitStruct.IsBufferable     = MPU_ACCESS_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
-  /* Region 2: DTCMRAM — cacheable para arranque correcto */
+  /* Region 2: DTCMRAM (0x20000000, 128KB) */
   MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
   MPU_InitStruct.Number           = MPU_REGION_NUMBER2;
   MPU_InitStruct.BaseAddress      = 0x20000000;
@@ -279,7 +303,7 @@ void MPU_Config(void)
   MPU_InitStruct.IsBufferable     = MPU_ACCESS_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
-  /* Region 3: FLASH CM7 */
+  /* Region 3: FLASH CM7 (0x08040000, 1MB) */
   MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
   MPU_InitStruct.Number           = MPU_REGION_NUMBER3;
   MPU_InitStruct.BaseAddress      = 0x08040000;
@@ -290,6 +314,20 @@ void MPU_Config(void)
   MPU_InitStruct.DisableExec      = MPU_INSTRUCTION_ACCESS_ENABLE;
   MPU_InitStruct.IsShareable      = MPU_ACCESS_NOT_SHAREABLE;
   MPU_InitStruct.IsCacheable      = MPU_ACCESS_CACHEABLE;
+  MPU_InitStruct.IsBufferable     = MPU_ACCESS_NOT_BUFFERABLE;
+  HAL_MPU_ConfigRegion(&MPU_InitStruct);
+
+  /* Region 4: RAM_D2 (0x30000000, 288KB) - buffers DMA, sin cache */
+  MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
+  MPU_InitStruct.Number           = MPU_REGION_NUMBER4;
+  MPU_InitStruct.BaseAddress      = 0x30000000;
+  MPU_InitStruct.Size             = MPU_REGION_SIZE_256KB;
+  MPU_InitStruct.SubRegionDisable = 0x00;
+  MPU_InitStruct.TypeExtField     = MPU_TEX_LEVEL0;
+  MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
+  MPU_InitStruct.DisableExec      = MPU_INSTRUCTION_ACCESS_DISABLE;
+  MPU_InitStruct.IsShareable      = MPU_ACCESS_SHAREABLE;
+  MPU_InitStruct.IsCacheable      = MPU_ACCESS_NOT_CACHEABLE;
   MPU_InitStruct.IsBufferable     = MPU_ACCESS_NOT_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
