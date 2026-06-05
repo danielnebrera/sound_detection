@@ -19,8 +19,8 @@ uint32_t dma_buf_b[AUDIO_DMA_BUFFER_SIZE];
 AudioCaptureContext g_audio_ctx = {0};
 
 /* SAI handles (definidos en sai.c) */
-extern SAI_HandleTypeDef hsai_BlockA1;
-extern SAI_HandleTypeDef hsai_BlockB1;
+extern SAI_HandleTypeDef hsai_BlockA2;
+extern SAI_HandleTypeDef hsai_BlockB2;
 
 /* Contadores de debug */
 volatile uint32_t sai_half_count = 0;
@@ -54,20 +54,22 @@ int audio_capture_start(AudioCaptureContext *ctx)
 {
     if (!ctx) return -1;
 
-    if (HAL_SAI_Receive_DMA(&hsai_BlockA1,
-                            (uint8_t *)dma_buf_a,
-                            AUDIO_DMA_BUFFER_SIZE) != HAL_OK)
-    {
-        ctx->error_count++;
-        return -1;
-    }
-
-    if (HAL_SAI_Receive_DMA(&hsai_BlockB1,
+    // 1. Esclavo primero — debe estar listo antes de que llegue el clock
+    if (HAL_SAI_Receive_DMA(&hsai_BlockB2,
                             (uint8_t *)dma_buf_b,
                             AUDIO_DMA_BUFFER_SIZE) != HAL_OK)
     {
         ctx->error_count++;
         return -2;
+    }
+
+    // 2. Maestro segundo — genera el clock una vez el esclavo está listo
+    if (HAL_SAI_Receive_DMA(&hsai_BlockA2,
+                            (uint8_t *)dma_buf_a,
+                            AUDIO_DMA_BUFFER_SIZE) != HAL_OK)
+    {
+        ctx->error_count++;
+        return -1;
     }
 
     return 0;
@@ -76,8 +78,8 @@ int audio_capture_start(AudioCaptureContext *ctx)
 int audio_capture_stop(AudioCaptureContext *ctx)
 {
     if (!ctx) return -1;
-    HAL_SAI_DMAStop(&hsai_BlockA1);
-    HAL_SAI_DMAStop(&hsai_BlockB1);
+    HAL_SAI_DMAStop(&hsai_BlockA2);
+    HAL_SAI_DMAStop(&hsai_BlockB2);
     return 0;
 }
 
@@ -95,24 +97,23 @@ void audio_capture_deinterleave(AudioCaptureContext *ctx, uint8_t half)
 {
     if (!ctx) return;
 
-    /* Offset de destino en los arrays ch0..ch3 — siempre 0..BUFFER_SIZE-1
-     * porque solo guardamos la mitad activa (ping-pong simple)           */
     uint32_t src_offset = (half == 0) ? 0 : AUDIO_BUFFER_SIZE;
 
     for (uint32_t i = 0; i < AUDIO_BUFFER_SIZE; i++)
     {
         uint32_t idx = src_offset + i * 2;
 
-        /* Verificar que no nos salimos del buffer DMA */
         if (idx + 1 >= AUDIO_DMA_BUFFER_SIZE * 2) break;
 
-        ctx->ch0[i] = (int32_t)dma_buf_a[idx];         /* Mic1 L */
-        ctx->ch1[i] = (int32_t)dma_buf_a[idx + 1];     /* Mic2 R */
-        ctx->ch2[i] = (int32_t)dma_buf_b[idx];         /* Mic3 L */
-        ctx->ch3[i] = (int32_t)dma_buf_b[idx + 1];     /* Mic4 R */
+        // SAI_B (dma_buf_b) → Mic1 (LR=GND=slot par) y Mic2 (LR=VCC=slot impar)
+        ctx->ch0[i] = (int32_t)dma_buf_b[idx];       /* Mic1 L */
+        ctx->ch1[i] = (int32_t)dma_buf_b[idx + 1];   /* Mic2 R */
+
+        // SAI_A (dma_buf_a) → Mic3 (LR=GND=slot par) y Mic4 (LR=VCC=slot impar)
+        ctx->ch2[i] = (int32_t)dma_buf_a[idx];       /* Mic3 L */
+        ctx->ch3[i] = (int32_t)dma_buf_a[idx + 1];   /* Mic4 R */
     }
 }
-
 /* ============================================================
  * POLL
  * ============================================================ */
@@ -172,14 +173,14 @@ void audio_capture_get_stats(AudioCaptureContext *ctx,
 void HAL_SAI_RxHalfCpltCallback(SAI_HandleTypeDef *hsai)
 {
     sai_half_count++;
-    if (hsai == &hsai_BlockA1)
+    if (hsai == &hsai_BlockA2)
         g_audio_ctx.dma_half_complete = 1;
 }
 
 void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai)
 {
     sai_full_count++;
-    if (hsai == &hsai_BlockA1)
+    if (hsai == &hsai_BlockA2)
         g_audio_ctx.dma_full_complete = 1;
 }
 

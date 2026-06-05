@@ -1,3 +1,4 @@
+
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
@@ -9,6 +10,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "dma.h"
+#include "i2c.h"
 #include "sai.h"
 #include "usart.h"
 #include "gpio.h"
@@ -19,6 +21,8 @@
 #include "flash_logger.h"
 #include "stm32h7xx.h"
 #include <string.h>
+extern uint32_t dma_buf_a[];
+extern uint32_t dma_buf_b[];
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -34,7 +38,7 @@
 /* USER CODE BEGIN PM */
 /* USER CODE END PM */
 
-/* Private variables ---------------------------------------------------------*/
+/* Private variables -----------------------------------------------------------*/
 /* USER CODE BEGIN PV */
 /* USER CODE END PV */
 
@@ -103,13 +107,31 @@ int main(void)
 
   MX_GPIO_Init();
   MX_DMA_Init();
-  MX_SAI1_Init();
+  MX_SAI2_Init();
   MX_USART1_UART_Init();
+  MX_I2C1_Init();
 
   /* USER CODE BEGIN 2 */
   LED_OFF(GPIO_PIN_5);
   LED_OFF(GPIO_PIN_6);
   LED_OFF(GPIO_PIN_7);
+
+  /* --- ENCENDIDO PMIC LDO2 (3.3V para micrófonos en Breakout Board) --- */
+  {
+    uint8_t pmic_addr    = 0x08 << 1;          /* 0x10 write address */
+    uint8_t set_volt[2]   = {0x51, 0x0F};       /* LDO2_VOLT: 3.3V   */
+    uint8_t enable_ldo[2] = {0x4F, 0x0F};       /* LDO2_CTRL: enable */
+
+    HAL_StatusTypeDef r1 = HAL_I2C_Master_Transmit(&hi2c1, pmic_addr, set_volt,   2, 100);
+    HAL_StatusTypeDef r2 = HAL_I2C_Master_Transmit(&hi2c1, pmic_addr, enable_ldo, 2, 100);
+    HAL_Delay(50);
+
+    if (r1 == HAL_OK && r2 == HAL_OK)
+      printf("PMIC: LDO2 ON OK\r\n");
+    else
+      printf("PMIC: LDO2 ERROR r1=%d r2=%d\r\n", (int)r1, (int)r2);
+  }
+  /* -------------------------------------------------------------------- */
 
   printf("CM7: arranque OK\r\n");
 
@@ -129,7 +151,7 @@ int main(void)
   printf("CM7: audio_capture_start OK\r\n");
 
   HAL_Delay(100);
-  if (hsai_BlockA1.State == HAL_SAI_STATE_BUSY_RX)
+  if (hsai_BlockA2.State == HAL_SAI_STATE_BUSY_RX)
     printf("CM7: SAI BUSY_RX OK\r\n");
   else
     printf("CM7: SAI NO esta en BUSY_RX\r\n");
@@ -147,34 +169,34 @@ int main(void)
     /* USER CODE END WHILE */
     /* USER CODE BEGIN 3 */
 
-    AudioBufferState state = audio_capture_get_data(&g_audio_ctx);
+	  AudioBufferState state = audio_capture_get_data(&g_audio_ctx);
 
-    if (state == AUDIO_BUFFER_HALF || state == AUDIO_BUFFER_FULL)
-    {
-      sample_count += AUDIO_BUFFER_SIZE;
-      LED_TOGGLE(GPIO_PIN_5);
+	  if (state == AUDIO_BUFFER_HALF || state == AUDIO_BUFFER_FULL)
+	  {
+	    sample_count += AUDIO_BUFFER_SIZE;
+	    LED_TOGGLE(GPIO_PIN_5);
 
-      if (sample_count >= AUDIO_SAMPLE_RATE)
-      {
-        sample_count = 0;
-        LED_TOGGLE(GPIO_PIN_6);
+	    if (sample_count >= AUDIO_SAMPLE_RATE)
+	    {
+	      sample_count = 0;
+	      LED_TOGGLE(GPIO_PIN_6);
 
-        uint32_t frames = 0, errors = 0;
-        audio_capture_get_stats(&g_audio_ctx, &frames, &errors);
-        printf("[AUDIO] frames=%lu errors=%lu\r\n", frames, errors);
+	      uint32_t frames = 0, errors = 0;
+	      audio_capture_get_stats(&g_audio_ctx, &frames, &errors);
+	      printf("[AUDIO] frames=%lu errors=%lu\r\n", frames, errors);
 
-        int32_t *ch0 = audio_capture_get_channel(&g_audio_ctx, 0);
-        int32_t *ch1 = audio_capture_get_channel(&g_audio_ctx, 1);
-        int32_t *ch2 = audio_capture_get_channel(&g_audio_ctx, 2);
-        int32_t *ch3 = audio_capture_get_channel(&g_audio_ctx, 3);
+	      int32_t *ch0 = audio_capture_get_channel(&g_audio_ctx, 0);
+	      int32_t *ch1 = audio_capture_get_channel(&g_audio_ctx, 1);
+	      int32_t *ch2 = audio_capture_get_channel(&g_audio_ctx, 2);
+	      int32_t *ch3 = audio_capture_get_channel(&g_audio_ctx, 3);
 
-        if (ch0 && ch1 && ch2 && ch3)
-        {
-          printf("  Mic1=%ld Mic2=%ld Mic3=%ld Mic4=%ld\r\n",
-                 ch0[0], ch1[0], ch2[0], ch3[0]);
-        }
-      }
-    }
+	      if (ch0 && ch1 && ch2 && ch3)
+	      {
+	        printf("  Mic1=%ld Mic2=%ld Mic3=%ld Mic4=%ld\r\n",
+	               ch0[0], ch1[0], ch2[0], ch3[0]);
+	      }
+	    }
+	  }
 
   }
   /* USER CODE END 3 */
@@ -194,6 +216,7 @@ void SystemClock_Config(void)
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
   /* USER CODE BEGIN SystemClock_OSC_Enable */
+  /* Habilitar oscilador externo 25MHz (OSCEN en PH1) */
   __HAL_RCC_GPIOH_CLK_ENABLE();
   GPIO_InitStruct.Pin = GPIO_PIN_1;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -239,7 +262,7 @@ void SystemClock_Config(void)
 void PeriphCommonClock_Config(void)
 {
   RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
-  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_SAI1;
+  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_SAI23;
   PeriphClkInitStruct.PLL3.PLL3M = 5;
   PeriphClkInitStruct.PLL3.PLL3N = 72;
   PeriphClkInitStruct.PLL3.PLL3P = 32;
@@ -248,7 +271,7 @@ void PeriphCommonClock_Config(void)
   PeriphClkInitStruct.PLL3.PLL3RGE = RCC_PLL3VCIRANGE_2;
   PeriphClkInitStruct.PLL3.PLL3VCOSEL = RCC_PLL3VCOWIDE;
   PeriphClkInitStruct.PLL3.PLL3FRACN = 2077;
-  PeriphClkInitStruct.Sai1ClockSelection = RCC_SAI1CLKSOURCE_PLL3;
+  PeriphClkInitStruct.Sai23ClockSelection = RCC_SAI23CLKSOURCE_PLL3;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK) { Error_Handler(); }
 }
 
@@ -260,6 +283,7 @@ void MPU_Config(void)
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
   HAL_MPU_Disable();
 
+  /* Region 0: bloquear todo el espacio de direcciones por defecto */
   MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
   MPU_InitStruct.Number           = MPU_REGION_NUMBER0;
   MPU_InitStruct.BaseAddress      = 0x00000000;
@@ -275,7 +299,7 @@ void MPU_Config(void)
 
   /* USER CODE BEGIN MPU_Config_Extra */
 
-  /* Region 1: RAM_D1 (0x24000000, 512KB) */
+  /* Region 1: RAM_D1 (0x24000000, 512KB) - cache habilitada */
   MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
   MPU_InitStruct.Number           = MPU_REGION_NUMBER1;
   MPU_InitStruct.BaseAddress      = 0x24000000;
@@ -303,7 +327,7 @@ void MPU_Config(void)
   MPU_InitStruct.IsBufferable     = MPU_ACCESS_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
-  /* Region 3: FLASH CM7 (0x08040000, 1MB) */
+  /* Region 3: FLASH CM7 (0x08040000, 1MB) - ejecutable */
   MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
   MPU_InitStruct.Number           = MPU_REGION_NUMBER3;
   MPU_InitStruct.BaseAddress      = 0x08040000;
@@ -317,7 +341,7 @@ void MPU_Config(void)
   MPU_InitStruct.IsBufferable     = MPU_ACCESS_NOT_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
-  /* Region 4: RAM_D2 (0x30000000, 288KB) - buffers DMA, sin cache */
+  /* Region 4: RAM_D2 (0x30000000, 256KB) - buffers DMA, sin cache */
   MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
   MPU_InitStruct.Number           = MPU_REGION_NUMBER4;
   MPU_InitStruct.BaseAddress      = 0x30000000;
@@ -336,6 +360,9 @@ void MPU_Config(void)
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 }
 
+/**
+  * @brief  This function is executed in case of error occurrence.
+  */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */

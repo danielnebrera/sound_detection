@@ -8,7 +8,9 @@
  * Pinout:
  *   SAI1_A: Mic1 (L) + Mic2 (R) on SD_A
  *   SAI1_B: Mic3 (L) + Mic4 (R) on SD_B
- *   Shared: SCK (PE5), FS (PE4)
+ *   Shared: SCK (PI5), FS (PI7)
+ *   SAI2_A: SD_A (PI6) - Mic3/Mic4
+ *   SAI2_B: SD_B (PG10) - Mic1/Mic2
  *
  * NOTA: Los buffers DMA (dma_buf_a, dma_buf_b) viven en audio_capture.c
  * en la seccion RAM_D2 para ser accesibles por DMA1. NO estan en el struct.
