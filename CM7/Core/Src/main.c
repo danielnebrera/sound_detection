@@ -1,4 +1,3 @@
-
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
@@ -21,6 +20,7 @@
 #include "flash_logger.h"
 #include "stm32h7xx.h"
 #include <string.h>
+#include "drone_detection.h"
 extern uint32_t dma_buf_a[];
 extern uint32_t dma_buf_b[];
 /* USER CODE END Includes */
@@ -150,6 +150,10 @@ int main(void)
   }
   printf("CM7: audio_capture_start OK\r\n");
 
+  if (!drone_detection_init()) {
+      printf("[MAIN] ERROR: deteccion no pudo iniciar\r\n");
+  }
+
   HAL_Delay(100);
   if (hsai_BlockA2.State == HAL_SAI_STATE_BUSY_RX)
     printf("CM7: SAI BUSY_RX OK\r\n");
@@ -180,6 +184,7 @@ int main(void)
 	    {
 	      sample_count = 0;
 	      LED_TOGGLE(GPIO_PIN_6);
+	      drone_detection_process();
 
 	      uint32_t frames = 0, errors = 0;
 	      audio_capture_get_stats(&g_audio_ctx, &frames, &errors);
