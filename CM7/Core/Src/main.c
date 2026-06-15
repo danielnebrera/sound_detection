@@ -177,30 +177,17 @@ int main(void)
 
 	  if (state == AUDIO_BUFFER_HALF || state == AUDIO_BUFFER_FULL)
 	  {
-	    sample_count += AUDIO_BUFFER_SIZE;
-	    LED_TOGGLE(GPIO_PIN_5);
+	      sample_count += AUDIO_BUFFER_SIZE;
+	      LED_TOGGLE(GPIO_PIN_5);
 
-	    if (sample_count >= AUDIO_SAMPLE_RATE)
-	    {
-	      sample_count = 0;
-	      LED_TOGGLE(GPIO_PIN_6);
-	      drone_detection_process();
+	      // Acumular muestras en buffer de 44100
+	      drone_detection_accumulate();
 
-	      uint32_t frames = 0, errors = 0;
-	      audio_capture_get_stats(&g_audio_ctx, &frames, &errors);
-	      printf("[AUDIO] frames=%lu errors=%lu\r\n", frames, errors);
-
-	      int32_t *ch0 = audio_capture_get_channel(&g_audio_ctx, 0);
-	      int32_t *ch1 = audio_capture_get_channel(&g_audio_ctx, 1);
-	      int32_t *ch2 = audio_capture_get_channel(&g_audio_ctx, 2);
-	      int32_t *ch3 = audio_capture_get_channel(&g_audio_ctx, 3);
-
-	      if (ch0 && ch1 && ch2 && ch3)
+	      if (drone_detection_is_ready())
 	      {
-	        printf("  Mic1=%ld Mic2=%ld Mic3=%ld Mic4=%ld\r\n",
-	               ch0[0], ch1[0], ch2[0], ch3[0]);
+	          LED_TOGGLE(GPIO_PIN_6);
+	          drone_detection_process();
 	      }
-	    }
 	  }
 
   }

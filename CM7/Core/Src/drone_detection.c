@@ -1,84 +1,94 @@
 /* =================================================================
  * drone_detection.c
- * Pipeline de detección de drones — 4 micrófonos — Portenta H7
+ * Pipeline de deteccion de drones — 4 microfonos — Portenta H7
  *
- * Para cada canal en cada segundo de audio:
- *   1. Normalizar int32 DMA → float [-1.0, 1.0]
- *   2. Eliminar DC offset
- *   3. Pre-énfasis (coef 0.97, igual que main.c ESP32)
- *   4. Calcular dBFS
- *   5. Gate de silencio (< SILENCE_DB → saltar)
- *   6. Aplicar DSP: HPF + ganancia×15 + tanh
- *   7. Calcular MFCC [100×20×1]
- *   8. Inferencia TFLite → p_drone [0.0-1.0]
- *
- * Combinar 4 canales → EMA asimétrica → ALERTA ROJA / NARANJA
+ * Estrategia de memoria: 1 buffer de acumulacion (172 KB).
+ * Se procesa 1 canal por ciclo de 1 segundo. Los 4 canales se
+ * procesan en 4 segundos consecutivos. El EMA integra los 4.
  * ================================================================= */
 
 #include "drone_detection.h"
 #include "mfcc_stm32.h"
 #include "model_runner_stm32.h"
-#include "audio_capture.h"   /* audio_capture_get_channel(), AUDIO_BUFFER_SIZE */
+#include "audio_capture.h"
 
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
-#include <stdlib.h>
 
-/* ── Configuración (idéntica al ESP32) ──────────────────────── */
-#define ALPHA_RISE          0.60f   /* EMA subida rápida          */
-#define ALPHA_FALL          0.15f   /* EMA bajada lenta           */
-#define THRESH_TRIGGER_FAST 0.85f   /* Alerta ROJA inmediata      */
-#define THRESH_SUSPICION    0.25f   /* Inicio rastreo             */
-#define THRESH_INSTANT      0.60f   /* Confirmación doble         */
-#define TICKS_PERSISTENCE   3       /* Ticks para alerta naranja  */
-#define SILENCE_DB         -35.0f   /* Gate de silencio (dBFS)    */
-
-/* ── Buffers PCM por canal (44100 floats = 172 KB × 4 = 688 KB)
-   Ubicados en RAM_D2 para no agotar RAM_D1 del CM7.
-   NOTA: Si la RAM_D2 es insuficiente, procesar un canal a la vez
-         reutilizando el mismo buffer.                            */
+#define ALPHA_RISE          0.60f
+#define ALPHA_FALL          0.15f
+#define THRESH_TRIGGER_FAST 0.85f
+#define THRESH_SUSPICION    0.25f
+#define THRESH_INSTANT      0.60f
+#define TICKS_PERSISTENCE   3
+#define SILENCE_DB         -35.0f
 #define SAMPLES_PER_SECOND  44100
 
-/* Procesamos un canal a la vez reutilizando el buffer — ahorro de RAM */
-// Por esto (RAM_D1, sin restricción DMA):
-static float s_pcm[SAMPLES_PER_SECOND];   /* 172 KB en RAM_D2 */
+/* Un solo buffer de acumulacion — 172 KB en RAM_D1 */
+static float s_accum[SAMPLES_PER_SECOND];
+static int   s_accum_idx   = 0;
+static bool  s_accum_ready = false;
+static int   s_current_ch  = 0;   /* canal que se acumula ahora (0-3) */
 
-/* Buffer MFCC de salida */
+/* Buffer MFCC */
 static mfcc_100x20_t s_mfcc;
 
-/* ── Estado EMA y persistencia ───────────────────────────────── */
-static float s_ema              = 0.0f;
-static int   s_persistence      = 0;
+/* Resultados de los 4 canales — se llenan de a 1 por segundo */
+static float s_p_ch[4]  = {0, 0, 0, 0};
+static float s_db_ch[4] = {-120, -120, -120, -120};
 
-/* ── Inicialización ──────────────────────────────────────────── */
+/* EMA y persistencia */
+static float s_ema         = 0.0f;
+static int   s_persistence = 0;
+
+/* ── Inicializacion ──────────────────────────────────────────── */
 bool drone_detection_init(void)
 {
     printf("[DET] Inicializando deteccion de drones...\r\n");
+    memset(s_accum, 0, sizeof(s_accum));
+    s_accum_idx   = 0;
+    s_accum_ready = false;
+    s_current_ch  = 0;
 
     if (!mfcc_stm32_init()) {
-        printf("[DET] ERROR: mfcc_stm32_init falló\r\n");
+        printf("[DET] ERROR: mfcc_stm32_init fallo\r\n");
         return false;
     }
-
     if (!model_runner_init()) {
-        printf("[DET] ERROR: model_runner_init falló\r\n");
+        printf("[DET] ERROR: model_runner_init fallo\r\n");
         return false;
     }
-
-    printf("[DET] Sistema listo — 4 microfonos activos\r\n");
+    printf("[DET] Sistema listo — procesando canal por canal\r\n");
     return true;
 }
 
-/* ── Helpers ─────────────────────────────────────────────────── */
-
-/* Normaliza int32 (ICS-43434: datos en bits 31-8) a float [-1,1] */
-static inline float int32_to_float(int32_t s)
+/* ── Acumular muestras del canal activo ──────────────────────── */
+void drone_detection_accumulate(void)
 {
-    return (float)s / (float)0x7FFFFF00;
+    extern AudioCaptureContext g_audio_ctx;
+
+    int32_t *ch = audio_capture_get_channel(&g_audio_ctx, s_current_ch);
+    if (ch == NULL) return;
+
+    int space = SAMPLES_PER_SECOND - s_accum_idx;
+    int copy  = (AUDIO_BUFFER_SIZE < space) ? AUDIO_BUFFER_SIZE : space;
+
+    for (int i = 0; i < copy; i++) {
+    	// Por esto (24 bits en bits 31-8):
+    	s_accum[s_accum_idx + i] = (float)(ch[i] >> 8) / 8388608.0f;
+    }
+
+    s_accum_idx += copy;
+    if (s_accum_idx >= SAMPLES_PER_SECOND) {
+        s_accum_idx   = 0;
+        s_accum_ready = true;
+    }
 }
 
-/* Calcula dBFS de un buffer de floats */
+bool drone_detection_is_ready(void) { return s_accum_ready; }
+
+/* ── Helpers ─────────────────────────────────────────────────── */
 static float compute_dbfs(const float *buf, int n)
 {
     float sum = 0.0f;
@@ -87,138 +97,75 @@ static float compute_dbfs(const float *buf, int n)
     return (rms > 1e-12f) ? 20.0f * log10f(rms) : -120.0f;
 }
 
-/* Construye el buffer PCM de 1 segundo desde un canal DMA.
-   El DMA captura en AUDIO_BUFFER_SIZE bloques; aquí acumulamos
-   tantos bloques como hagan falta para llenar 44100 muestras.
-   Por simplicidad usamos directamente el puntero del canal
-   que ya tiene AUDIO_BUFFER_SIZE muestras del último frame.
-   Para 1 segundo real se necesita integrar el loop principal —
-   esta función convierte lo que hay disponible y rellena con 0. */
-static void build_pcm_channel(const int32_t *src, int src_len, float *dst)
-{
-    int copy = (src_len < SAMPLES_PER_SECOND) ? src_len : SAMPLES_PER_SECOND;
-    for (int i = 0; i < copy; i++) {
-        dst[i] = int32_to_float(src[i]);
-    }
-    /* Rellenar el resto con ceros si src_len < 44100 */
-    if (copy < SAMPLES_PER_SECOND) {
-        memset(&dst[copy], 0, (SAMPLES_PER_SECOND - copy) * sizeof(float));
-    }
-}
-
-/* ── Pipeline principal ──────────────────────────────────────── */
+/* ── Pipeline — procesa el canal activo ──────────────────────── */
 void drone_detection_process(void)
 {
-    float p_channels[4] = {0};
-    float db_channels[4] = {0};
+    if (!s_accum_ready) return;
+    s_accum_ready = false;
 
-    /* Obtener punteros a los 4 canales del audio_capture */
-    extern AudioCaptureContext g_audio_ctx;  /* definido en main.c */
-    int32_t *ch[4] = {
-        audio_capture_get_channel(&g_audio_ctx, 0),  /* Mic1 */
-        audio_capture_get_channel(&g_audio_ctx, 1),  /* Mic2 */
-        audio_capture_get_channel(&g_audio_ctx, 2),  /* Mic3 */
-        audio_capture_get_channel(&g_audio_ctx, 3)   /* Mic4 */
-    };
+    int ch = s_current_ch;
 
-    /* Procesar cada canal independientemente */
-    for (int ch_idx = 0; ch_idx < 4; ch_idx++)
-    {
-        if (ch[ch_idx] == NULL) {
-            p_channels[ch_idx] = 0.0f;
-            db_channels[ch_idx] = -120.0f;
-            continue;
-        }
+    /* 1. DC offset */
+    float mean = 0.0f;
+    for (int i = 0; i < SAMPLES_PER_SECOND; i++) mean += s_accum[i];
+    mean /= SAMPLES_PER_SECOND;
+    for (int i = 0; i < SAMPLES_PER_SECOND; i++) s_accum[i] -= mean;
 
-        /* 1. Convertir int32 → float */
-        build_pcm_channel(ch[ch_idx], AUDIO_BUFFER_SIZE, s_pcm);
+    /* 2. Pre-enfasis */
+    for (int i = SAMPLES_PER_SECOND - 1; i >= 1; i--)
+        s_accum[i] -= 0.97f * s_accum[i - 1];
 
-        /* 2. Eliminar DC offset */
-        float mean = 0.0f;
-        for (int i = 0; i < SAMPLES_PER_SECOND; i++) mean += s_pcm[i];
-        mean /= SAMPLES_PER_SECOND;
-        for (int i = 0; i < SAMPLES_PER_SECOND; i++) s_pcm[i] -= mean;
-
-        /* 3. Pre-énfasis (coef 0.97, igual que ESP32) */
-        for (int i = SAMPLES_PER_SECOND - 1; i >= 1; i--) {
-            s_pcm[i] -= 0.97f * s_pcm[i - 1];
-        }
-
-        /* 4. Calcular dBFS */
-        db_channels[ch_idx] = compute_dbfs(s_pcm, SAMPLES_PER_SECOND);
-
-        /* 5. Gate de silencio */
-        if (db_channels[ch_idx] < SILENCE_DB) {
-            p_channels[ch_idx] = 0.0f;
-            continue;
-        }
-
-        /* 6. Aplicar DSP del ESP32: HPF + ganancia + tanh */
-        mfcc_stm32_apply_dsp(s_pcm, SAMPLES_PER_SECOND);
+    /* 3. dBFS */
+    s_db_ch[ch] = compute_dbfs(s_accum, SAMPLES_PER_SECOND);
 
 
-        printf("[DEBUG] PCM[0]=%.6f PCM[100]=%.6f PCM[500]=%.6f dBFS=%.1f\r\n",
-               s_pcm[0], s_pcm[100], s_pcm[500], db_channels[ch_idx]);
+    printf("[DBG ch%d] accum[0]=%.6f accum[512]=%.6f accum[1000]=%.6f\r\n",
+           ch, s_accum[0], s_accum[512], s_accum[1000]);
 
-        printf("[DEBUG] src_len=%d copy=%d\r\n", src_len,
-               (src_len < SAMPLES_PER_SECOND) ? src_len : SAMPLES_PER_SECOND);
+    /* 4. Gate de silencio */
+    if (s_db_ch[ch] < SILENCE_DB) {
+        s_p_ch[ch] = 0.0f;
+    } else {
+        /* 5. DSP: HPF + ganancia×15 + tanh */
+        mfcc_stm32_apply_dsp(s_accum, SAMPLES_PER_SECOND);
 
-        /* 7. Calcular MFCC */
-        if (!mfcc_stm32_compute(s_pcm, &s_mfcc)) {
-            p_channels[ch_idx] = 0.0f;
-            continue;
-        }
-
-        /* 8. Inferencia */
-        p_channels[ch_idx] = model_runner_infer(s_mfcc.data);
-    }
-
-    /* ── Combinar 4 canales: promedio ponderado ──────────────── */
-    float p_drone = 0.0f;
-    int   valid   = 0;
-    for (int i = 0; i < 4; i++) {
-        if (p_channels[i] >= 0.0f) {
-            p_drone += p_channels[i];
-            valid++;
+        /* 6. MFCC */
+        if (mfcc_stm32_compute(s_accum, &s_mfcc)) {
+            /* 7. Inferencia */
+            s_p_ch[ch] = model_runner_infer(s_mfcc.data);
+        } else {
+            s_p_ch[ch] = 0.0f;
         }
     }
-    if (valid > 0) p_drone /= (float)valid;
 
-    /* ── EMA asimétrica (idéntica al ESP32) ──────────────────── */
-    float alpha = (p_drone > s_ema) ? ALPHA_RISE : ALPHA_FALL;
-    s_ema = s_ema * (1.0f - alpha) + p_drone * alpha;
+    /* Avanzar al siguiente canal */
+    s_current_ch = (s_current_ch + 1) % 4;
 
-    /* ── Sistema de alertas ──────────────────────────────────── */
-    /* Imprimir estado de los 4 micrófonos */
-    printf("Mic1:%5.0fdB p=%.2f | Mic2:%5.0fdB p=%.2f | "
-           "Mic3:%5.0fdB p=%.2f | Mic4:%5.0fdB p=%.2f | "
-           "EMA:%.2f",
-           db_channels[0], p_channels[0],
-           db_channels[1], p_channels[1],
-           db_channels[2], p_channels[2],
-           db_channels[3], p_channels[3],
-           s_ema);
+    /* Cuando completamos los 4 canales → calcular EMA y alertas */
+    if (s_current_ch == 0) {
+        float p_drone = (s_p_ch[0] + s_p_ch[1] + s_p_ch[2] + s_p_ch[3]) / 4.0f;
+        float alpha   = (p_drone > s_ema) ? ALPHA_RISE : ALPHA_FALL;
+        s_ema = s_ema * (1.0f - alpha) + p_drone * alpha;
 
-    /* CAMINO A: Alerta ROJA inmediata */
-    if (s_ema >= THRESH_TRIGGER_FAST && p_drone > THRESH_INSTANT) {
-        printf(" >>> ALERTA ROJA: DRON DETECTADO (%.0f%%)\r\n",
-               s_ema * 100.0f);
-        s_persistence = TICKS_PERSISTENCE;
-    }
-    /* CAMINO B: Rastreo dron lejano */
-    else if (s_ema >= THRESH_SUSPICION) {
-        s_persistence++;
-        printf(" [RASTREANDO %d/%d]\r\n", s_persistence, TICKS_PERSISTENCE);
+        printf("Mic1:%5.0fdB p=%.2f | Mic2:%5.0fdB p=%.2f | "
+               "Mic3:%5.0fdB p=%.2f | Mic4:%5.0fdB p=%.2f | EMA:%.2f",
+               s_db_ch[0], s_p_ch[0],
+               s_db_ch[1], s_p_ch[1],
+               s_db_ch[2], s_p_ch[2],
+               s_db_ch[3], s_p_ch[3], s_ema);
 
-        if (s_persistence >= TICKS_PERSISTENCE) {
-            printf(" >>> ALERTA NARANJA: DRON LEJANO CONFIRMADO\r\n");
+        if (s_ema >= THRESH_TRIGGER_FAST && p_drone > THRESH_INSTANT) {
+            printf(" >>> ALERTA ROJA: DRON DETECTADO (%.0f%%)\r\n", s_ema * 100.0f);
             s_persistence = TICKS_PERSISTENCE;
+        } else if (s_ema >= THRESH_SUSPICION) {
+            s_persistence++;
+            printf(" [RASTREANDO %d/%d]\r\n", s_persistence, TICKS_PERSISTENCE);
+            if (s_persistence >= TICKS_PERSISTENCE)
+                printf(" >>> ALERTA NARANJA: DRON LEJANO CONFIRMADO\r\n");
+        } else {
+            if (s_persistence > 0) printf(" [senal perdida]\r\n");
+            else printf("\r\n");
+            s_persistence = 0;
         }
-    }
-    /* CAMINO C: Sin señal */
-    else {
-        if (s_persistence > 0) printf(" [señal perdida]\r\n");
-        else printf("\r\n");
-        s_persistence = 0;
     }
 }
