@@ -21,6 +21,8 @@
 #include "stm32h7xx.h"
 #include <string.h>
 #include "drone_detection.h"
+#include "fdcan.h"
+#include "can_sender.h"
 extern uint32_t dma_buf_a[];
 extern uint32_t dma_buf_b[];
 /* USER CODE END Includes */
@@ -40,6 +42,9 @@ extern uint32_t dma_buf_b[];
 
 /* Private variables -----------------------------------------------------------*/
 /* USER CODE BEGIN PV */
+extern volatile uint32_t sai_half_count;
+extern volatile uint32_t sai_full_count;
+extern volatile uint32_t dma_irq_count;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -110,11 +115,16 @@ int main(void)
   MX_SAI2_Init();
   MX_USART1_UART_Init();
   MX_I2C1_Init();
+  MX_FDCAN1_Init();
 
   /* USER CODE BEGIN 2 */
   LED_OFF(GPIO_PIN_5);
   LED_OFF(GPIO_PIN_6);
   LED_OFF(GPIO_PIN_7);
+
+  if (!can_sender_init()) {
+     printf("[MAIN] ERROR: CAN no pudo iniciar\r\n");
+  }
 
   /* --- ENCENDIDO PMIC LDO2 (3.3V para micrófonos en Breakout Board) --- */
   {
@@ -170,26 +180,21 @@ int main(void)
   uint32_t sample_count = 0;
   while (1)
   {
-    /* USER CODE END WHILE */
-    /* USER CODE BEGIN 3 */
+      AudioBufferState state = audio_capture_get_data(&g_audio_ctx);
 
-	  AudioBufferState state = audio_capture_get_data(&g_audio_ctx);
+      if (state == AUDIO_BUFFER_HALF || state == AUDIO_BUFFER_FULL)
+      {
+          sample_count += AUDIO_BUFFER_SIZE;
+          LED_TOGGLE(GPIO_PIN_5);
 
-	  if (state == AUDIO_BUFFER_HALF || state == AUDIO_BUFFER_FULL)
-	  {
-	      sample_count += AUDIO_BUFFER_SIZE;
-	      LED_TOGGLE(GPIO_PIN_5);
+          drone_detection_accumulate();
 
-	      // Acumular muestras en buffer de 44100
-	      drone_detection_accumulate();
-
-	      if (drone_detection_is_ready())
-	      {
-	          LED_TOGGLE(GPIO_PIN_6);
-	          drone_detection_process();
-	      }
-	  }
-
+          if (drone_detection_is_ready())
+          {
+              LED_TOGGLE(GPIO_PIN_6);
+              drone_detection_process();
+          }
+      }
   }
   /* USER CODE END 3 */
 }

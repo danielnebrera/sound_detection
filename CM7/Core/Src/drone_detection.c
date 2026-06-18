@@ -11,6 +11,7 @@
 #include "mfcc_stm32.h"
 #include "model_runner_stm32.h"
 #include "audio_capture.h"
+#include "can_sender.h"
 
 #include <math.h>
 #include <string.h>
@@ -167,5 +168,9 @@ void drone_detection_process(void)
             else printf("\r\n");
             s_persistence = 0;
         }
+        /* ── Transmitir por CAN ──────────────────────────────── */
+                uint8_t alerta_can = (s_ema >= THRESH_TRIGGER_FAST) ? 3 :
+                                     (s_ema >= THRESH_SUSPICION)     ? 1 : 0;
+                can_sender_transmit(s_p_ch, s_db_ch, s_ema, alerta_can);
     }
 }
