@@ -2,18 +2,17 @@
  * @file audio_capture.h
  * @brief SAI + DMA Audio Capture Driver for STM32H7
  *
- * Captures 4-channel audio from 2 SAI blocks (SAI1_A + SAI1_B)
+ * Captures 4-channel audio from 2 SAI blocks (SAI2_A + SAI2_B)
  * with hardware multiplexing via L/R pins.
  *
  * Pinout:
- *   SAI1_A: Mic1 (L) + Mic2 (R) on SD_A
- *   SAI1_B: Mic3 (L) + Mic4 (R) on SD_B
+ *   SAI2_A: SD_A (PI6)  - Mic3/Mic4  (Master RX)
+ *   SAI2_B: SD_B (PG10) - Mic1/Mic2  (Slave  RX, sync to A)
  *   Shared: SCK (PI5), FS (PI7)
- *   SAI2_A: SD_A (PI6) - Mic3/Mic4
- *   SAI2_B: SD_B (PG10) - Mic1/Mic2
  *
- * NOTA: Los buffers DMA (dma_buf_a, dma_buf_b) viven en audio_capture.c
- * en la seccion RAM_D2 para ser accesibles por DMA1. NO estan en el struct.
+ * FIX v2: Callbacks separados para Block_A y Block_B.
+ * Solo se procesa cuando AMBOS DMAs completaron la misma mitad,
+ * evitando race condition entre DMA1_Stream0 y DMA1_Stream1.
  */
 
 #ifndef AUDIO_CAPTURE_H
@@ -44,6 +43,11 @@ typedef enum {
  * @brief Audio capture context
  * Los buffers DMA NO estan aqui — viven en audio_capture.c en RAM_D2.
  * Aqui solo estan los canales desentrelazados y los flags de estado.
+ *
+ * FLAGS SEPARADOS por bloque SAI:
+ *   dma_a_half / dma_a_full → Block_A (Mic3/Mic4, maestro)
+ *   dma_b_half / dma_b_full → Block_B (Mic1/Mic2, esclavo)
+ * Se procesa solo cuando ambos flags del mismo tipo están activos.
  */
 typedef struct {
     /* Canales desentrelazados (salida procesada) */
@@ -52,9 +56,16 @@ typedef struct {
     int32_t ch2[AUDIO_BUFFER_SIZE];  /* Microfono 3 */
     int32_t ch3[AUDIO_BUFFER_SIZE];  /* Microfono 4 */
 
-    /* Flags de estado — seteados por callbacks DMA */
+    /* Flags separados por bloque SAI — seteados por callbacks DMA */
+    volatile uint8_t dma_a_half;   /* Block_A (maestro) mitad */
+    volatile uint8_t dma_a_full;   /* Block_A (maestro) completo */
+    volatile uint8_t dma_b_half;   /* Block_B (esclavo) mitad */
+    volatile uint8_t dma_b_full;   /* Block_B (esclavo) completo */
+
+    /* Flags legacy — mantenidos por compatibilidad pero no se usan */
     volatile uint8_t dma_half_complete;
     volatile uint8_t dma_full_complete;
+
     volatile AudioBufferState buffer_state;
 
     /* Estadisticas */
@@ -65,15 +76,15 @@ typedef struct {
 
 /* ============ PUBLIC API ============ */
 
-int           audio_capture_init(AudioCaptureContext *ctx);
-int           audio_capture_start(AudioCaptureContext *ctx);
-int           audio_capture_stop(AudioCaptureContext *ctx);
+int              audio_capture_init(AudioCaptureContext *ctx);
+int              audio_capture_start(AudioCaptureContext *ctx);
+int              audio_capture_stop(AudioCaptureContext *ctx);
 AudioBufferState audio_capture_get_data(AudioCaptureContext *ctx);
-int32_t*      audio_capture_get_channel(AudioCaptureContext *ctx, uint8_t channel);
-void          audio_capture_deinterleave(AudioCaptureContext *ctx, uint8_t half);
-void          audio_capture_get_stats(AudioCaptureContext *ctx,
-                                      uint32_t *frames_processed,
-                                      uint32_t *errors);
+int32_t*         audio_capture_get_channel(AudioCaptureContext *ctx, uint8_t channel);
+void             audio_capture_deinterleave(AudioCaptureContext *ctx, uint8_t half);
+void             audio_capture_get_stats(AudioCaptureContext *ctx,
+                                         uint32_t *frames_processed,
+                                         uint32_t *errors);
 
 /* Contexto global */
 extern AudioCaptureContext g_audio_ctx;

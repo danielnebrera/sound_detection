@@ -1,52 +1,46 @@
 /**
- * @file audio_capture.c
- * @brief SAI + DMA Audio Capture Implementation for STM32H7
+ * @file audio_capture.c — v5
+ * Usa Mic1 (ch0, SAI2_SD_B slot impar) + Mic3 (ch2, SAI2_SD_A slot par)
+ * Trigger por Block_A. Maestro primero, delay 5ms, esclavo después.
  */
 
 #include "audio_capture.h"
+#include <stdio.h>
 
-/* ============================================================
- * Buffers DMA en RAM_D2 (0x30000000) — accesibles por DMA1
- * NO deben estar en el struct AudioCaptureContext
- * ============================================================ */
 __attribute__((section(".RAM_D2_bss")))
 uint32_t dma_buf_a[AUDIO_DMA_BUFFER_SIZE];
 
 __attribute__((section(".RAM_D2_bss")))
 uint32_t dma_buf_b[AUDIO_DMA_BUFFER_SIZE];
 
-/* Contexto global */
 AudioCaptureContext g_audio_ctx = {0};
 
-/* SAI handles (definidos en sai.c) */
 extern SAI_HandleTypeDef hsai_BlockA2;
 extern SAI_HandleTypeDef hsai_BlockB2;
 
-/* Contadores de debug */
 volatile uint32_t sai_half_count = 0;
 volatile uint32_t sai_full_count = 0;
-
-/* ============================================================
- * INIT / START / STOP
- * ============================================================ */
+volatile uint32_t block_b_half_count = 0;
+volatile uint32_t block_b_full_count = 0;
 
 int audio_capture_init(AudioCaptureContext *ctx)
 {
     if (!ctx) return -1;
-
     memset(dma_buf_a, 0, sizeof(dma_buf_a));
     memset(dma_buf_b, 0, sizeof(dma_buf_b));
     memset(ctx->ch0, 0, sizeof(ctx->ch0));
     memset(ctx->ch1, 0, sizeof(ctx->ch1));
     memset(ctx->ch2, 0, sizeof(ctx->ch2));
     memset(ctx->ch3, 0, sizeof(ctx->ch3));
-
+    ctx->dma_a_half        = 0;
+    ctx->dma_a_full        = 0;
+    ctx->dma_b_half        = 0;
+    ctx->dma_b_full        = 0;
     ctx->dma_half_complete = 0;
     ctx->dma_full_complete = 0;
     ctx->buffer_state      = AUDIO_BUFFER_EMPTY;
     ctx->frame_count       = 0;
     ctx->error_count       = 0;
-
     return 0;
 }
 
@@ -54,18 +48,20 @@ int audio_capture_start(AudioCaptureContext *ctx)
 {
     if (!ctx) return -1;
 
-    // 1. Esclavo primero — debe estar listo antes de que llegue el clock
-    if (HAL_SAI_Receive_DMA(&hsai_BlockB2,
-                            (uint8_t *)dma_buf_b,
+    /* Maestro primero */
+    if (HAL_SAI_Receive_DMA(&hsai_BlockA2,
+                            (uint8_t *)dma_buf_a,
                             AUDIO_DMA_BUFFER_SIZE) != HAL_OK)
     {
         ctx->error_count++;
         return -2;
     }
 
-    // 2. Maestro segundo — genera el clock una vez el esclavo está listo
-    if (HAL_SAI_Receive_DMA(&hsai_BlockA2,
-                            (uint8_t *)dma_buf_a,
+    HAL_Delay(5);
+
+    /* Esclavo después */
+    if (HAL_SAI_Receive_DMA(&hsai_BlockB2,
+                            (uint8_t *)dma_buf_b,
                             AUDIO_DMA_BUFFER_SIZE) != HAL_OK)
     {
         ctx->error_count++;
@@ -86,12 +82,18 @@ int audio_capture_stop(AudioCaptureContext *ctx)
 /* ============================================================
  * DEINTERLEAVE
  *
- * dma_buf_a contiene pares estereo: [L0, R0, L1, R1, ...]
- * half=0 → procesa primera mitad  (indices 0   .. BUFFER_SIZE-1)
- * half=1 → procesa segunda mitad  (indices BUFFER_SIZE .. 2*BUFFER_SIZE-1)
+ * dma_buf_b (SAI2_SD_B, PG10):
+ *   idx+1 → slot impar → Mic1 (SEL=VCC) ← señal confirmada
+ *   idx   → slot par   → Mic2 (SEL=GND) ← señal débil/problema
  *
- * Dentro de cada mitad hay BUFFER_SIZE muestras stereo,
- * es decir BUFFER_SIZE*2 uint32_t en el buffer DMA.
+ * dma_buf_a (SAI2_SD_A, PI6):
+ *   idx   → slot par   → Mic3 (SEL=GND)
+ *   idx+1 → slot impar → Mic4 (SEL=VCC)
+ *
+ * ch0 = Mic1 (dma_buf_b slot impar) — SAI2_SD_B
+ * ch1 = Mic3 (dma_buf_a slot par)   — SAI2_SD_A ← nuevo
+ * ch2 = Mic3 (dma_buf_a slot par)   — duplicado por compatibilidad
+ * ch3 = Mic4 (dma_buf_a slot impar) — SAI2_SD_A
  * ============================================================ */
 void audio_capture_deinterleave(AudioCaptureContext *ctx, uint8_t half)
 {
@@ -103,36 +105,37 @@ void audio_capture_deinterleave(AudioCaptureContext *ctx, uint8_t half)
     {
         uint32_t idx = src_offset + i * 2;
 
-        if (idx + 1 >= AUDIO_DMA_BUFFER_SIZE * 2) break;
+        if (idx + 1 >= AUDIO_DMA_BUFFER_SIZE) break;
 
-        // SAI_B (dma_buf_b) → Mic1 (LR=GND=slot par) y Mic2 (LR=VCC=slot impar)
-        ctx->ch0[i] = (int32_t)dma_buf_b[idx];       /* Mic1 L */
-        ctx->ch1[i] = (int32_t)dma_buf_b[idx + 1];   /* Mic2 R */
+        /* Mic1 — SAI2_SD_B slot impar (confirmado funciona) */
+        ctx->ch0[i] = (int32_t)dma_buf_b[idx + 1];
 
-        // SAI_A (dma_buf_a) → Mic3 (LR=GND=slot par) y Mic4 (LR=VCC=slot impar)
-        ctx->ch2[i] = (int32_t)dma_buf_a[idx];       /* Mic3 L */
-        ctx->ch3[i] = (int32_t)dma_buf_a[idx + 1];   /* Mic4 R */
+        /* Mic3 — SAI2_SD_A slot par (nuevo canal activo) */
+        ctx->ch1[i] = (int32_t)dma_buf_a[idx + 1];  /* slot impar — señal real */
+
+
+        /* Mic3 y Mic4 en ch2/ch3 para referencia */
+        ctx->ch2[i] = (int32_t)dma_buf_a[idx];
+        ctx->ch3[i] = (int32_t)dma_buf_a[idx + 1];
     }
 }
-/* ============================================================
- * POLL
- * ============================================================ */
+
 AudioBufferState audio_capture_get_data(AudioCaptureContext *ctx)
 {
     if (!ctx) return AUDIO_BUFFER_EMPTY;
 
-    if (ctx->dma_half_complete)
+    if (ctx->dma_a_half)
     {
-        ctx->dma_half_complete = 0;
+        ctx->dma_a_half = 0;
         audio_capture_deinterleave(ctx, 0);
         ctx->buffer_state = AUDIO_BUFFER_HALF;
         ctx->frame_count++;
         return AUDIO_BUFFER_HALF;
     }
 
-    if (ctx->dma_full_complete)
+    if (ctx->dma_a_full)
     {
-        ctx->dma_full_complete = 0;
+        ctx->dma_a_full = 0;
         audio_capture_deinterleave(ctx, 1);
         ctx->buffer_state = AUDIO_BUFFER_FULL;
         ctx->frame_count++;
@@ -142,9 +145,6 @@ AudioBufferState audio_capture_get_data(AudioCaptureContext *ctx)
     return AUDIO_BUFFER_EMPTY;
 }
 
-/* ============================================================
- * GETTERS
- * ============================================================ */
 int32_t* audio_capture_get_channel(AudioCaptureContext *ctx, uint8_t channel)
 {
     if (!ctx || channel >= AUDIO_CHANNELS) return NULL;
@@ -167,21 +167,24 @@ void audio_capture_get_stats(AudioCaptureContext *ctx,
     if (errors)           *errors           = ctx->error_count;
 }
 
-/* ============================================================
- * DMA CALLBACKS
- * ============================================================ */
 void HAL_SAI_RxHalfCpltCallback(SAI_HandleTypeDef *hsai)
 {
     sai_half_count++;
-    if (hsai == &hsai_BlockA2)
-        g_audio_ctx.dma_half_complete = 1;
+    if (hsai == &hsai_BlockA2) g_audio_ctx.dma_a_half = 1;
+    if (hsai == &hsai_BlockB2) {
+        g_audio_ctx.dma_b_half = 1;
+        block_b_half_count++;
+    }
 }
 
 void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai)
 {
     sai_full_count++;
-    if (hsai == &hsai_BlockA2)
-        g_audio_ctx.dma_full_complete = 1;
+    if (hsai == &hsai_BlockA2) g_audio_ctx.dma_a_full = 1;
+    if (hsai == &hsai_BlockB2) {
+        g_audio_ctx.dma_b_full = 1;
+        block_b_full_count++;
+    }
 }
 
 void HAL_SAI_ErrorCallback(SAI_HandleTypeDef *hsai)

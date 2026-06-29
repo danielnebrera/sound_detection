@@ -182,6 +182,8 @@ int main(void)
   {
       AudioBufferState state = audio_capture_get_data(&g_audio_ctx);
 
+
+
       if (state == AUDIO_BUFFER_HALF || state == AUDIO_BUFFER_FULL)
       {
           sample_count += AUDIO_BUFFER_SIZE;
