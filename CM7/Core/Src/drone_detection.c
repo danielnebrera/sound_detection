@@ -1,14 +1,14 @@
 /* =================================================================
- * drone_detection.c — v12
- * Mic1 (ch0, SAI2_SD_B) + Mic3 (ch1, SAI2_SD_A)
- * Ambos con misma normalización >>8 / 8388608.0f
+ * drone_detection.c — v13 final (sin CAN)
+ * Mic2 (SAI2_SD_B, SEL=VCC) → ch0
+ * Mic4 (SAI2_SD_A, SEL=VCC) → ch1
+ * HPF continuo, MFCC + TFLite
  * ================================================================= */
 
 #include "drone_detection.h"
 #include "mfcc_stm32.h"
 #include "model_runner_stm32.h"
 #include "audio_capture.h"
-#include "can_sender.h"
 
 #include <math.h>
 #include <string.h>
@@ -17,16 +17,13 @@
 #define ALPHA_RISE          0.60f
 #define ALPHA_FALL          0.15f
 #define THRESH_TRIGGER_FAST 0.85f
-#define THRESH_SUSPICION    0.25f
 #define THRESH_INSTANT      0.60f
 #define TICKS_PERSISTENCE   3
 #define SILENCE_DB         -35.0f
 #define SAMPLES_PER_SECOND  44100
 
-/* Buffer ch0 en RAM_D1 */
 static float s_accum_ch0[SAMPLES_PER_SECOND];
 
-/* Buffer ch1 en RAM_D2 */
 __attribute__((section(".RAM_D2_bss")))
 static float s_accum_ch1[SAMPLES_PER_SECOND];
 
@@ -40,8 +37,8 @@ static float s_hpf_out[2] = {0, 0};
 
 static mfcc_100x20_t s_mfcc;
 
-static float s_p_ch[4]    = {0, 0, 0, 0};
-static float s_db_ch[4]   = {-120, -120, -120, -120};
+static float s_p_ch[2]    = {0, 0};
+static float s_db_ch[2]   = {-120, -120};
 static bool  s_ch_valid[2] = {false, false};
 
 static float s_ema        = 0.0f;
@@ -66,24 +63,23 @@ bool drone_detection_init(void)
         printf("[DET] ERROR: model_runner_init fallo\r\n");
         return false;
     }
-    printf("[DET] Sistema listo — Mic1(SAI_B) + Mic3(SAI_A)\r\n");
+    printf("[DET] Sistema listo — Mic2(SAI_B) + Mic4(SAI_A)\r\n");
     return true;
 }
 
 void drone_detection_accumulate(void)
 {
     extern AudioCaptureContext g_audio_ctx;
-    int32_t *ch0 = audio_capture_get_channel(&g_audio_ctx, 0);  /* Mic1 */
-    int32_t *ch1 = audio_capture_get_channel(&g_audio_ctx, 1);  /* Mic3 */
+    int32_t *ch0 = audio_capture_get_channel(&g_audio_ctx, 0); /* Mic2 */
+    int32_t *ch1 = audio_capture_get_channel(&g_audio_ctx, 1); /* Mic4 */
 
     const float alpha = 0.9f;
 
-    /* ── Mic1 (ch0) ─────────────────────────────────────────── */
     if (!s_rdy_ch0 && ch0 != NULL) {
         int space = SAMPLES_PER_SECOND - s_idx_ch0;
         int copy  = (AUDIO_BUFFER_SIZE < space) ? AUDIO_BUFFER_SIZE : space;
         for (int i = 0; i < copy; i++) {
-            float in = (float)(ch0[i] >> 8) / 8388608.0f;
+            float in  = (float)(ch0[i] >> 8) / 8388608.0f;
             float hpf = alpha * (s_hpf_out[0] + in - s_hpf_in[0]);
             s_hpf_in[0]  = in;
             s_hpf_out[0] = hpf;
@@ -96,12 +92,11 @@ void drone_detection_accumulate(void)
         }
     }
 
-    /* ── Mic3 (ch1) — misma normalización ───────────────────── */
     if (!s_rdy_ch1 && ch1 != NULL) {
         int space = SAMPLES_PER_SECOND - s_idx_ch1;
         int copy  = (AUDIO_BUFFER_SIZE < space) ? AUDIO_BUFFER_SIZE : space;
         for (int i = 0; i < copy; i++) {
-            float in = (float)(ch1[i] >> 8) / 8388608.0f;
+            float in  = (float)(ch1[i] >> 8) / 8388608.0f;
             float hpf = alpha * (s_hpf_out[1] + in - s_hpf_in[1]);
             s_hpf_in[1]  = in;
             s_hpf_out[1] = hpf;
@@ -128,7 +123,7 @@ static float compute_dbfs(const float *buf, int n)
     return (rms > 1e-12f) ? 20.0f * log10f(rms) : -120.0f;
 }
 
-static void process_channel(int ch, float *buf, float silence_db)
+static void process_channel(int ch, float *buf)
 {
     float mean = 0.0f;
     for (int i = 0; i < SAMPLES_PER_SECOND; i++) mean += buf[i];
@@ -140,9 +135,7 @@ static void process_channel(int ch, float *buf, float silence_db)
 
     s_db_ch[ch] = compute_dbfs(buf, SAMPLES_PER_SECOND);
 
-    printf("[GATE ch%d] dBFS=%.1f\r\n", ch, s_db_ch[ch]);
-
-    if (s_db_ch[ch] < silence_db) {
+    if (s_db_ch[ch] < SILENCE_DB) {
         s_p_ch[ch]     = 0.0f;
         s_ch_valid[ch] = false;
         return;
@@ -163,54 +156,31 @@ void drone_detection_process(void)
     s_rdy_ch0 = false;
     s_rdy_ch1 = false;
 
-    process_channel(0, s_accum_ch0, SILENCE_DB);
-    process_channel(1, s_accum_ch1, SILENCE_DB);
+    process_channel(0, s_accum_ch0);
+    process_channel(1, s_accum_ch1);
 
-    float p_drone = 0.0f;
-    int   valid   = 0;
-    for (int i = 0; i < 2; i++) {
-        if (s_ch_valid[i]) {
-            p_drone += s_p_ch[i];
-            valid++;
-        }
-    }
+    /* Fusión de canales */
+    float p_final = 0.0f;
+    int   valid_count = 0;
+    if (s_ch_valid[0]) { p_final += s_p_ch[0]; valid_count++; }
+    if (s_ch_valid[1]) { p_final += s_p_ch[1]; valid_count++; }
+    if (valid_count > 0) p_final /= valid_count;
 
-    if (valid == 0) {
-        s_ema = s_ema * (1.0f - ALPHA_FALL);
-        s_persistence = 0;
-        printf("Mic1:%5.0fdB p=0.00 | Mic3:%5.0fdB p=0.00 | EMA:%.2f\r\n",
-               s_db_ch[0], s_db_ch[1], s_ema);
-        can_sender_transmit(s_p_ch, s_db_ch, s_ema, 0);
-        return;
-    }
+    /* EMA */
+    float alpha = (p_final > s_ema) ? ALPHA_RISE : ALPHA_FALL;
+    s_ema = alpha * p_final + (1.0f - alpha) * s_ema;
 
-    p_drone /= (float)valid;
-
-    float alpha = (p_drone > s_ema) ? ALPHA_RISE : ALPHA_FALL;
-    s_ema = s_ema * (1.0f - alpha) + p_drone * alpha;
-
-    printf("Mic1:%5.0fdB p=%.2f | Mic3:%5.0fdB p=%.2f | EMA:%.2f",
-           s_db_ch[0], s_p_ch[0],
-           s_db_ch[1], s_p_ch[1],
-           s_ema);
-
-    if (s_ema >= THRESH_TRIGGER_FAST && p_drone > THRESH_INSTANT) {
-        printf(" >>> ALERTA ROJA: DRON DETECTADO (%.0f%%)\r\n", s_ema * 100.0f);
+    /* Persistencia */
+    if (s_ema >= THRESH_TRIGGER_FAST || p_final >= THRESH_INSTANT)
         s_persistence = TICKS_PERSISTENCE;
-    } else if (s_ema >= THRESH_SUSPICION) {
-        s_persistence++;
-        if (s_persistence > TICKS_PERSISTENCE)
-            s_persistence = TICKS_PERSISTENCE;
-        printf(" [RASTREANDO %d/%d]\r\n", s_persistence, TICKS_PERSISTENCE);
-        if (s_persistence >= TICKS_PERSISTENCE)
-            printf(" >>> ALERTA NARANJA: DRON LEJANO CONFIRMADO\r\n");
-    } else {
-        if (s_persistence > 0) printf(" [senal perdida]\r\n");
-        else printf("\r\n");
-        s_persistence = 0;
-    }
+    else if (s_persistence > 0)
+        s_persistence--;
 
-    uint8_t alerta_can = (s_ema >= THRESH_TRIGGER_FAST) ? 3 :
-                         (s_ema >= THRESH_SUSPICION)     ? 1 : 0;
-    can_sender_transmit(s_p_ch, s_db_ch, s_ema, alerta_can);
+    bool alerta = (s_persistence > 0);
+
+    printf("[DET] Mic2:%5.1fdB Mic4:%5.1fdB p=[%.2f %.2f] EMA=%.2f %s\r\n",
+           s_db_ch[0], s_db_ch[1],
+           s_p_ch[0], s_p_ch[1],
+           s_ema,
+           alerta ? "*** DRON ***" : "");
 }

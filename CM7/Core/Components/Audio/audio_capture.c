@@ -1,11 +1,18 @@
 /**
- * @file audio_capture.c — v5
- * Usa Mic1 (ch0, SAI2_SD_B slot impar) + Mic3 (ch2, SAI2_SD_A slot par)
- * Trigger por Block_A. Maestro primero, delay 5ms, esclavo después.
+ * @file audio_capture.c — v9 estable
+ *
+ * Sistema activo con 2 micrófonos ICS-43434 (SEL=VCC, canal RIGHT):
+ *   ch0 = Mic2 — SAI2_SD_B (PG10), slot impar, SEL=VCC ✅
+ *   ch1 = Mic4 — SAI2_SD_A (PI6),  slot impar, SEL=VCC ✅
+ *   ch2 = Mic3 — SAI2_SD_A (PI6),  slot par,   SEL=GND (no activo)
+ *   ch3 = Mic1 — SAI2_SD_B (PG10), slot par,   SEL=GND (no activo)
+ *
+ * Trigger por Block_A (maestro). Esclavo primero, maestro después.
  */
 
 #include "audio_capture.h"
 #include <stdio.h>
+#include <math.h>
 
 __attribute__((section(".RAM_D2_bss")))
 uint32_t dma_buf_a[AUDIO_DMA_BUFFER_SIZE];
@@ -48,9 +55,9 @@ int audio_capture_start(AudioCaptureContext *ctx)
 {
     if (!ctx) return -1;
 
-    /* Maestro primero */
-    if (HAL_SAI_Receive_DMA(&hsai_BlockA2,
-                            (uint8_t *)dma_buf_a,
+    /* Esclavo primero */
+    if (HAL_SAI_Receive_DMA(&hsai_BlockB2,
+                            (uint8_t *)dma_buf_b,
                             AUDIO_DMA_BUFFER_SIZE) != HAL_OK)
     {
         ctx->error_count++;
@@ -59,9 +66,9 @@ int audio_capture_start(AudioCaptureContext *ctx)
 
     HAL_Delay(5);
 
-    /* Esclavo después */
-    if (HAL_SAI_Receive_DMA(&hsai_BlockB2,
-                            (uint8_t *)dma_buf_b,
+    /* Maestro después — genera SCK y WS */
+    if (HAL_SAI_Receive_DMA(&hsai_BlockA2,
+                            (uint8_t *)dma_buf_a,
                             AUDIO_DMA_BUFFER_SIZE) != HAL_OK)
     {
         ctx->error_count++;
@@ -79,44 +86,44 @@ int audio_capture_stop(AudioCaptureContext *ctx)
     return 0;
 }
 
-/* ============================================================
- * DEINTERLEAVE
- *
- * dma_buf_b (SAI2_SD_B, PG10):
- *   idx+1 → slot impar → Mic1 (SEL=VCC) ← señal confirmada
- *   idx   → slot par   → Mic2 (SEL=GND) ← señal débil/problema
- *
- * dma_buf_a (SAI2_SD_A, PI6):
- *   idx   → slot par   → Mic3 (SEL=GND)
- *   idx+1 → slot impar → Mic4 (SEL=VCC)
- *
- * ch0 = Mic1 (dma_buf_b slot impar) — SAI2_SD_B
- * ch1 = Mic3 (dma_buf_a slot par)   — SAI2_SD_A ← nuevo
- * ch2 = Mic3 (dma_buf_a slot par)   — duplicado por compatibilidad
- * ch3 = Mic4 (dma_buf_a slot impar) — SAI2_SD_A
- * ============================================================ */
 void audio_capture_deinterleave(AudioCaptureContext *ctx, uint8_t half)
 {
     if (!ctx) return;
 
-    uint32_t src_offset = (half == 0) ? 0 : AUDIO_BUFFER_SIZE;
+    /* ── DEBUG RAW ─────────────────────────────────────────── */
+    static uint32_t dbg_count = 0;
+    if (++dbg_count >= 86) {
+        dbg_count = 0;
+
+        float db_b_par = 0, db_b_imp = 0, db_a_par = 0, db_a_imp = 0;
+        for (int i = 0; i < 64; i++) {
+            float s;
+            s = (float)((int32_t)dma_buf_b[i*2]   >> 8) / 8388608.0f; db_b_par += s*s;
+            s = (float)((int32_t)dma_buf_b[i*2+1] >> 8) / 8388608.0f; db_b_imp += s*s;
+            s = (float)((int32_t)dma_buf_a[i*2]   >> 8) / 8388608.0f; db_a_par += s*s;
+            s = (float)((int32_t)dma_buf_a[i*2+1] >> 8) / 8388608.0f; db_a_imp += s*s;
+        }
+        db_b_par = (db_b_par > 1e-12f) ? 20.0f*log10f(sqrtf(db_b_par/64)) : -120.0f;
+        db_b_imp = (db_b_imp > 1e-12f) ? 20.0f*log10f(sqrtf(db_b_imp/64)) : -120.0f;
+        db_a_par = (db_a_par > 1e-12f) ? 20.0f*log10f(sqrtf(db_a_par/64)) : -120.0f;
+        db_a_imp = (db_a_imp > 1e-12f) ? 20.0f*log10f(sqrtf(db_a_imp/64)) : -120.0f;
+
+        printf("[RAW] B_par:%5.1f B_imp:%5.1f A_par:%5.1f A_imp:%5.1f dBFS\r\n",
+               db_b_par, db_b_imp, db_a_par, db_a_imp);
+    }
+    /* ─────────────────────────────────────────────────────── */
+
+    uint32_t offset = (half == 0U) ? 0U : (AUDIO_DMA_BUFFER_SIZE / 2U);
 
     for (uint32_t i = 0; i < AUDIO_BUFFER_SIZE; i++)
     {
-        uint32_t idx = src_offset + i * 2;
-
+        uint32_t idx = offset + i * 2;
         if (idx + 1 >= AUDIO_DMA_BUFFER_SIZE) break;
 
-        /* Mic1 — SAI2_SD_B slot impar (confirmado funciona) */
-        ctx->ch0[i] = (int32_t)dma_buf_b[idx + 1];
-
-        /* Mic3 — SAI2_SD_A slot par (nuevo canal activo) */
-        ctx->ch1[i] = (int32_t)dma_buf_a[idx + 1];  /* slot impar — señal real */
-
-
-        /* Mic3 y Mic4 en ch2/ch3 para referencia */
-        ctx->ch2[i] = (int32_t)dma_buf_a[idx];
-        ctx->ch3[i] = (int32_t)dma_buf_a[idx + 1];
+        ctx->ch0[i] = (int32_t)dma_buf_b[idx + 1]; /* Mic2 slot impar SEL=VCC */
+        ctx->ch1[i] = (int32_t)dma_buf_a[idx + 1]; /* Mic4 slot impar SEL=VCC */
+        ctx->ch2[i] = (int32_t)dma_buf_a[idx];      /* Mic3 slot par   SEL=GND */
+        ctx->ch3[i] = (int32_t)dma_buf_b[idx];      /* Mic1 slot par   SEL=GND */
     }
 }
 
@@ -150,10 +157,10 @@ int32_t* audio_capture_get_channel(AudioCaptureContext *ctx, uint8_t channel)
     if (!ctx || channel >= AUDIO_CHANNELS) return NULL;
     switch (channel)
     {
-        case 0: return ctx->ch0;
-        case 1: return ctx->ch1;
-        case 2: return ctx->ch2;
-        case 3: return ctx->ch3;
+        case 0: return ctx->ch0; /* Mic2 */
+        case 1: return ctx->ch1; /* Mic4 */
+        case 2: return ctx->ch2; /* Mic3 */
+        case 3: return ctx->ch3; /* Mic1 */
         default: return NULL;
     }
 }

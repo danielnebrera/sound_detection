@@ -23,8 +23,6 @@
 #include "drone_detection.h"
 #include "fdcan.h"
 #include "can_sender.h"
-extern uint32_t dma_buf_a[];
-extern uint32_t dma_buf_b[];
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -126,11 +124,11 @@ int main(void)
      printf("[MAIN] ERROR: CAN no pudo iniciar\r\n");
   }
 
-  /* --- ENCENDIDO PMIC LDO2 (3.3V para micrófonos en Breakout Board) --- */
+  /* --- ENCENDIDO PMIC LDO2 (3.3V para micrófonos) --- */
   {
-    uint8_t pmic_addr    = 0x08 << 1;          /* 0x10 write address */
-    uint8_t set_volt[2]   = {0x51, 0x0F};       /* LDO2_VOLT: 3.3V   */
-    uint8_t enable_ldo[2] = {0x4F, 0x0F};       /* LDO2_CTRL: enable */
+    uint8_t pmic_addr     = 0x08 << 1;
+    uint8_t set_volt[2]   = {0x51, 0x0F};
+    uint8_t enable_ldo[2] = {0x4F, 0x0F};
 
     HAL_StatusTypeDef r1 = HAL_I2C_Master_Transmit(&hi2c1, pmic_addr, set_volt,   2, 100);
     HAL_StatusTypeDef r2 = HAL_I2C_Master_Transmit(&hi2c1, pmic_addr, enable_ldo, 2, 100);
@@ -141,7 +139,7 @@ int main(void)
     else
       printf("PMIC: LDO2 ERROR r1=%d r2=%d\r\n", (int)r1, (int)r2);
   }
-  /* -------------------------------------------------------------------- */
+  /* --------------------------------------------------- */
 
   printf("CM7: arranque OK\r\n");
 
@@ -177,16 +175,12 @@ int main(void)
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN WHILE */
-  uint32_t sample_count = 0;
   while (1)
   {
       AudioBufferState state = audio_capture_get_data(&g_audio_ctx);
 
-
-
       if (state == AUDIO_BUFFER_HALF || state == AUDIO_BUFFER_FULL)
       {
-          sample_count += AUDIO_BUFFER_SIZE;
           LED_TOGGLE(GPIO_PIN_5);
 
           drone_detection_accumulate();
@@ -198,7 +192,7 @@ int main(void)
           }
       }
   }
-  /* USER CODE END 3 */
+  /* USER CODE END WHILE */
 }
 
 /**
@@ -214,7 +208,6 @@ void SystemClock_Config(void)
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
-  /* USER CODE BEGIN SystemClock_OSC_Enable */
   /* Habilitar oscilador externo 25MHz (OSCEN en PH1) */
   __HAL_RCC_GPIOH_CLK_ENABLE();
   GPIO_InitStruct.Pin = GPIO_PIN_1;
@@ -224,7 +217,6 @@ void SystemClock_Config(void)
   HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
   HAL_GPIO_WritePin(GPIOH, GPIO_PIN_1, GPIO_PIN_SET);
   for(volatile uint32_t i = 0; i < 500000; i++) {}
-  /* USER CODE END SystemClock_OSC_Enable */
 
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
@@ -296,8 +288,6 @@ void MPU_Config(void)
   MPU_InitStruct.IsBufferable     = MPU_ACCESS_NOT_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
-  /* USER CODE BEGIN MPU_Config_Extra */
-
   /* Region 1: RAM_D1 (0x24000000, 512KB) - cache habilitada */
   MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
   MPU_InitStruct.Number           = MPU_REGION_NUMBER1;
@@ -353,8 +343,6 @@ void MPU_Config(void)
   MPU_InitStruct.IsCacheable      = MPU_ACCESS_NOT_CACHEABLE;
   MPU_InitStruct.IsBufferable     = MPU_ACCESS_NOT_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
-
-  /* USER CODE END MPU_Config_Extra */
 
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 }
