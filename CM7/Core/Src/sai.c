@@ -2,10 +2,11 @@
 /**
   ******************************************************************************
   * File Name          : SAI.c
-  * Description        : Configuración estable HAL_SAI_Init() manual
-  *                      Mic2(SAI_B/SEL=VCC) + Mic4(SAI_A/SEL=VCC) activos
-  *                      ACTIVE_LOW + RISINGEDGE + BEFOREFIRSTBIT + DATASIZE_32
-  *                      FIFOThreshold = EMPTY  DMA Priority = LOW
+  * Description        : PRUEBA 1 — HAL_SAI_InitProtocol() I2S estándar 24 bits
+  *                      Elimina errores sutiles de FREE_PROTOCOL manual.
+  *                      Block_A: MODEMASTER_RX, ASYNCHRONOUS
+  *                      Block_B: MODESLAVE_RX,  SYNCHRONOUS
+  *                      Ambos usan SAI_I2S_STANDARD + SAI_PROTOCOL_DATASIZE_24BIT
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -22,15 +23,14 @@ void MX_SAI2_Init(void)
 {
   /* ================================================================
    * BLOCK_A — Maestro asíncrono
-   * Mic3(PI6, SEL=GND, slot par)  — no activo
-   * Mic4(PI6, SEL=VCC, slot impar) — activo ✅
+   * HAL_SAI_InitProtocol calcula FrameInit y SlotInit automáticamente
+   * No se toca CKSTR ni nada manual después
    * ================================================================ */
   hsai_BlockA2.Instance = SAI2_Block_A;
-
   hsai_BlockA2.Init.AudioMode      = SAI_MODEMASTER_RX;
   hsai_BlockA2.Init.Synchro        = SAI_ASYNCHRONOUS;
   hsai_BlockA2.Init.OutputDrive    = SAI_OUTPUTDRIVE_DISABLE;
-  hsai_BlockA2.Init.NoDivider      = SAI_MCK_OVERSAMPLING_DISABLE;
+  hsai_BlockA2.Init.NoDivider      = SAI_MASTERDIVIDER_ENABLE;
   hsai_BlockA2.Init.MckOverSampling= SAI_MCK_OVERSAMPLING_DISABLE;
   hsai_BlockA2.Init.FIFOThreshold  = SAI_FIFOTHRESHOLD_EMPTY;
   hsai_BlockA2.Init.AudioFrequency = SAI_AUDIO_FREQUENCY_44K;
@@ -39,35 +39,20 @@ void MX_SAI2_Init(void)
   hsai_BlockA2.Init.CompandingMode = SAI_NOCOMPANDING;
   hsai_BlockA2.Init.TriState       = SAI_OUTPUT_NOTRELEASED;
 
-  hsai_BlockA2.Init.Protocol       = SAI_FREE_PROTOCOL;
-  hsai_BlockA2.Init.DataSize       = SAI_DATASIZE_32;
-  hsai_BlockA2.Init.FirstBit       = SAI_FIRSTBIT_MSB;
-  hsai_BlockA2.Init.ClockStrobing  = SAI_CLOCKSTROBING_FALLINGEDGE;
-
-  hsai_BlockA2.FrameInit.FrameLength       = 64;
-  hsai_BlockA2.FrameInit.ActiveFrameLength = 32;
-  hsai_BlockA2.FrameInit.FSDefinition      = SAI_FS_CHANNEL_IDENTIFICATION;
-  hsai_BlockA2.FrameInit.FSPolarity        = SAI_FS_ACTIVE_LOW;
-  hsai_BlockA2.FrameInit.FSOffset          = SAI_FS_BEFOREFIRSTBIT;
-
-  hsai_BlockA2.SlotInit.FirstBitOffset = 0;
-  hsai_BlockA2.SlotInit.SlotSize       = SAI_SLOTSIZE_32B;
-  hsai_BlockA2.SlotInit.SlotNumber     = 2;
-  hsai_BlockA2.SlotInit.SlotActive     = SAI_SLOTACTIVE_0 | SAI_SLOTACTIVE_1;
-
-  if (HAL_SAI_Init(&hsai_BlockA2) != HAL_OK)
+  if (HAL_SAI_InitProtocol(&hsai_BlockA2,
+                            SAI_I2S_STANDARD,
+                            SAI_PROTOCOL_DATASIZE_24BIT,
+                            2U) != HAL_OK)
     Error_Handler();
 
   /* ================================================================
    * BLOCK_B — Esclavo síncrono
-   * Mic1(PG10, SEL=GND, slot par)  — no activo
-   * Mic2(PG10, SEL=VCC, slot impar) — activo ✅
    * ================================================================ */
   hsai_BlockB2.Instance = SAI2_Block_B;
-
   hsai_BlockB2.Init.AudioMode      = SAI_MODESLAVE_RX;
   hsai_BlockB2.Init.Synchro        = SAI_SYNCHRONOUS;
   hsai_BlockB2.Init.OutputDrive    = SAI_OUTPUTDRIVE_DISABLE;
+  hsai_BlockB2.Init.NoDivider      = SAI_MASTERDIVIDER_ENABLE;
   hsai_BlockB2.Init.MckOverSampling= SAI_MCK_OVERSAMPLING_DISABLE;
   hsai_BlockB2.Init.FIFOThreshold  = SAI_FIFOTHRESHOLD_EMPTY;
   hsai_BlockB2.Init.SynchroExt     = SAI_SYNCEXT_DISABLE;
@@ -75,24 +60,28 @@ void MX_SAI2_Init(void)
   hsai_BlockB2.Init.CompandingMode = SAI_NOCOMPANDING;
   hsai_BlockB2.Init.TriState       = SAI_OUTPUT_RELEASED;
 
-  hsai_BlockB2.Init.Protocol       = SAI_FREE_PROTOCOL;
-  hsai_BlockB2.Init.DataSize       = SAI_DATASIZE_32;
-  hsai_BlockB2.Init.FirstBit       = SAI_FIRSTBIT_MSB;
-  hsai_BlockB2.Init.ClockStrobing  = SAI_CLOCKSTROBING_FALLINGEDGE;
-
-  hsai_BlockB2.FrameInit.FrameLength       = 64;
-  hsai_BlockB2.FrameInit.ActiveFrameLength = 32;
-  hsai_BlockB2.FrameInit.FSDefinition      = SAI_FS_CHANNEL_IDENTIFICATION;
-  hsai_BlockB2.FrameInit.FSPolarity        = SAI_FS_ACTIVE_LOW;
-  hsai_BlockB2.FrameInit.FSOffset          = SAI_FS_BEFOREFIRSTBIT;
-
-  hsai_BlockB2.SlotInit.FirstBitOffset = 0;
-  hsai_BlockB2.SlotInit.SlotSize       = SAI_SLOTSIZE_32B;
-  hsai_BlockB2.SlotInit.SlotNumber     = 2;
-  hsai_BlockB2.SlotInit.SlotActive     = SAI_SLOTACTIVE_0 | SAI_SLOTACTIVE_1;
-
-  if (HAL_SAI_Init(&hsai_BlockB2) != HAL_OK)
+  if (HAL_SAI_InitProtocol(&hsai_BlockB2,
+                            SAI_I2S_STANDARD,
+                            SAI_PROTOCOL_DATASIZE_24BIT,
+                            2U) != HAL_OK)
     Error_Handler();
+
+  /* Registros efectivos para comparar con FREE_PROTOCOL */
+  printf("[PROTO_A] CR1=%08lX CR2=%08lX FRCR=%08lX SLOTR=%08lX\r\n",
+         (unsigned long)SAI2_Block_A->CR1,
+         (unsigned long)SAI2_Block_A->CR2,
+         (unsigned long)SAI2_Block_A->FRCR,
+         (unsigned long)SAI2_Block_A->SLOTR);
+
+  printf("[PROTO_B] CR1=%08lX CR2=%08lX FRCR=%08lX SLOTR=%08lX\r\n",
+         (unsigned long)SAI2_Block_B->CR1,
+         (unsigned long)SAI2_Block_B->CR2,
+         (unsigned long)SAI2_Block_B->FRCR,
+         (unsigned long)SAI2_Block_B->SLOTR);
+
+  printf("[CKSTR] A=%lu B=%lu\r\n",
+         (unsigned long)((SAI2_Block_A->CR1 & SAI_xCR1_CKSTR) != 0U),
+         (unsigned long)((SAI2_Block_B->CR1 & SAI_xCR1_CKSTR) != 0U));
 }
 
 static uint32_t SAI2_client = 0;
@@ -100,7 +89,6 @@ static uint32_t SAI2_client = 0;
 void HAL_SAI_MspInit(SAI_HandleTypeDef* saiHandle)
 {
   GPIO_InitTypeDef GPIO_InitStruct;
-
   if(saiHandle->Instance==SAI2_Block_A)
   {
     if (SAI2_client == 0) __HAL_RCC_SAI2_CLK_ENABLE();
@@ -125,7 +113,6 @@ void HAL_SAI_MspInit(SAI_HandleTypeDef* saiHandle)
     __HAL_LINKDMA(saiHandle,hdmarx,hdma_sai2_a);
     __HAL_LINKDMA(saiHandle,hdmatx,hdma_sai2_a);
   }
-
   if(saiHandle->Instance==SAI2_Block_B)
   {
     if (SAI2_client == 0) __HAL_RCC_SAI2_CLK_ENABLE();

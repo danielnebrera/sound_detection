@@ -1,13 +1,8 @@
 /**
- * @file audio_capture.c — v9 estable
+ * @file audio_capture.c — v9 estable + RAW con offset correcto
  *
- * Sistema activo con 2 micrófonos ICS-43434 (SEL=VCC, canal RIGHT):
- *   ch0 = Mic2 — SAI2_SD_B (PG10), slot impar, SEL=VCC ✅
- *   ch1 = Mic4 — SAI2_SD_A (PI6),  slot impar, SEL=VCC ✅
- *   ch2 = Mic3 — SAI2_SD_A (PI6),  slot par,   SEL=GND (no activo)
- *   ch3 = Mic1 — SAI2_SD_B (PG10), slot par,   SEL=GND (no activo)
- *
- * Trigger por Block_A (maestro). Esclavo primero, maestro después.
+ * Corrección: el bloque RAW ahora usa el mismo offset que el deinterleave,
+ * midiendo la mitad actualmente procesada en lugar de siempre la primera mitad.
  */
 
 #include "audio_capture.h"
@@ -55,7 +50,6 @@ int audio_capture_start(AudioCaptureContext *ctx)
 {
     if (!ctx) return -1;
 
-    /* Esclavo primero */
     if (HAL_SAI_Receive_DMA(&hsai_BlockB2,
                             (uint8_t *)dma_buf_b,
                             AUDIO_DMA_BUFFER_SIZE) != HAL_OK)
@@ -66,7 +60,6 @@ int audio_capture_start(AudioCaptureContext *ctx)
 
     HAL_Delay(5);
 
-    /* Maestro después — genera SCK y WS */
     if (HAL_SAI_Receive_DMA(&hsai_BlockA2,
                             (uint8_t *)dma_buf_a,
                             AUDIO_DMA_BUFFER_SIZE) != HAL_OK)
@@ -90,18 +83,21 @@ void audio_capture_deinterleave(AudioCaptureContext *ctx, uint8_t half)
 {
     if (!ctx) return;
 
-    /* ── DEBUG RAW ─────────────────────────────────────────── */
+    uint32_t offset = (half == 0U) ? 0U : (AUDIO_DMA_BUFFER_SIZE / 2U);
+
+    /* ── DEBUG RAW — usa el mismo offset que el deinterleave ── */
     static uint32_t dbg_count = 0;
     if (++dbg_count >= 86) {
         dbg_count = 0;
 
         float db_b_par = 0, db_b_imp = 0, db_a_par = 0, db_a_imp = 0;
         for (int i = 0; i < 64; i++) {
+            uint32_t idx = offset + (uint32_t)i * 2U;
             float s;
-            s = (float)((int32_t)dma_buf_b[i*2]   >> 8) / 8388608.0f; db_b_par += s*s;
-            s = (float)((int32_t)dma_buf_b[i*2+1] >> 8) / 8388608.0f; db_b_imp += s*s;
-            s = (float)((int32_t)dma_buf_a[i*2]   >> 8) / 8388608.0f; db_a_par += s*s;
-            s = (float)((int32_t)dma_buf_a[i*2+1] >> 8) / 8388608.0f; db_a_imp += s*s;
+            s = (float)((int32_t)dma_buf_b[idx]     >> 8) / 8388608.0f; db_b_par += s*s;
+            s = (float)((int32_t)dma_buf_b[idx + 1] >> 8) / 8388608.0f; db_b_imp += s*s;
+            s = (float)((int32_t)dma_buf_a[idx]     >> 8) / 8388608.0f; db_a_par += s*s;
+            s = (float)((int32_t)dma_buf_a[idx + 1] >> 8) / 8388608.0f; db_a_imp += s*s;
         }
         db_b_par = (db_b_par > 1e-12f) ? 20.0f*log10f(sqrtf(db_b_par/64)) : -120.0f;
         db_b_imp = (db_b_imp > 1e-12f) ? 20.0f*log10f(sqrtf(db_b_imp/64)) : -120.0f;
@@ -112,8 +108,6 @@ void audio_capture_deinterleave(AudioCaptureContext *ctx, uint8_t half)
                db_b_par, db_b_imp, db_a_par, db_a_imp);
     }
     /* ─────────────────────────────────────────────────────── */
-
-    uint32_t offset = (half == 0U) ? 0U : (AUDIO_DMA_BUFFER_SIZE / 2U);
 
     for (uint32_t i = 0; i < AUDIO_BUFFER_SIZE; i++)
     {
