@@ -1,13 +1,24 @@
 /**
- * @file audio_capture.c — v9 estable + RAW con offset correcto
+ * @file audio_capture.c
  *
- * Corrección: el bloque RAW ahora usa el mismo offset que el deinterleave,
- * midiendo la mitad actualmente procesada en lugar de siempre la primera mitad.
+ * Correcciones principales:
+ *
+ * 1. Cada mitad DMA contiene realmente 512 muestras por slot.
+ *    El buffer DMA completo tiene 2048 palabras:
+ *       512 muestras x 2 slots x 2 mitades.
+ *
+ * 2. Solo se desentrelaza cuando SAI2_A y SAI2_B terminaron
+ *    la MISMA mitad, evitando mezclar audio nuevo con audio antiguo.
+ *
+ * 3. El diagnostico RAW usa la misma conversion PCM24 firmada
+ *    que usa drone_detection.
  */
 
 #include "audio_capture.h"
-#include <stdio.h>
+
 #include <math.h>
+#include <stdbool.h>
+#include <stdio.h>
 
 __attribute__((section(".RAM_D2_bss")))
 uint32_t dma_buf_a[AUDIO_DMA_BUFFER_SIZE];
@@ -20,50 +31,93 @@ AudioCaptureContext g_audio_ctx = {0};
 extern SAI_HandleTypeDef hsai_BlockA2;
 extern SAI_HandleTypeDef hsai_BlockB2;
 
-volatile uint32_t sai_half_count = 0;
-volatile uint32_t sai_full_count = 0;
-volatile uint32_t block_b_half_count = 0;
-volatile uint32_t block_b_full_count = 0;
+volatile uint32_t sai_half_count = 0U;
+volatile uint32_t sai_full_count = 0U;
+volatile uint32_t block_b_half_count = 0U;
+volatile uint32_t block_b_full_count = 0U;
+
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
+_Static_assert(
+    AUDIO_DMA_BUFFER_SIZE ==
+        (AUDIO_BUFFER_SIZE * 4U),
+    "AUDIO_DMA_BUFFER_SIZE debe ser AUDIO_BUFFER_SIZE * 4"
+);
+#endif
+
+/* PCM24 alineado a la derecha en bits [23:0]. */
+static inline float sai24_word_to_float(uint32_t word)
+{
+    int32_t sample =
+        (int32_t)(word & 0x00FFFFFFU);
+
+    if ((sample & 0x00800000L) != 0)
+    {
+        sample |= (int32_t)0xFF000000U;
+    }
+
+    return (float)sample / 8388608.0f;
+}
 
 int audio_capture_init(AudioCaptureContext *ctx)
 {
-    if (!ctx) return -1;
+    if (ctx == NULL)
+    {
+        return -1;
+    }
+
     memset(dma_buf_a, 0, sizeof(dma_buf_a));
     memset(dma_buf_b, 0, sizeof(dma_buf_b));
+
     memset(ctx->ch0, 0, sizeof(ctx->ch0));
     memset(ctx->ch1, 0, sizeof(ctx->ch1));
     memset(ctx->ch2, 0, sizeof(ctx->ch2));
     memset(ctx->ch3, 0, sizeof(ctx->ch3));
-    ctx->dma_a_half        = 0;
-    ctx->dma_a_full        = 0;
-    ctx->dma_b_half        = 0;
-    ctx->dma_b_full        = 0;
-    ctx->dma_half_complete = 0;
-    ctx->dma_full_complete = 0;
-    ctx->buffer_state      = AUDIO_BUFFER_EMPTY;
-    ctx->frame_count       = 0;
-    ctx->error_count       = 0;
+
+    ctx->dma_a_half = 0U;
+    ctx->dma_a_full = 0U;
+    ctx->dma_b_half = 0U;
+    ctx->dma_b_full = 0U;
+
+    ctx->dma_half_complete = 0U;
+    ctx->dma_full_complete = 0U;
+
+    ctx->buffer_state = AUDIO_BUFFER_EMPTY;
+    ctx->frame_count = 0U;
+    ctx->error_count = 0U;
+
     return 0;
 }
 
 int audio_capture_start(AudioCaptureContext *ctx)
 {
-    if (!ctx) return -1;
+    if (ctx == NULL)
+    {
+        return -1;
+    }
 
-    if (HAL_SAI_Receive_DMA(&hsai_BlockB2,
-                            (uint8_t *)dma_buf_b,
-                            AUDIO_DMA_BUFFER_SIZE) != HAL_OK)
+    /*
+     * B es esclavo sincronizado con A.
+     * Se arma primero para que este listo antes de que A genere SCK/FS.
+     */
+    if (HAL_SAI_Receive_DMA(
+            &hsai_BlockB2,
+            (uint8_t *)dma_buf_b,
+            AUDIO_DMA_BUFFER_SIZE
+        ) != HAL_OK)
     {
         ctx->error_count++;
         return -2;
     }
 
-    HAL_Delay(5);
+    HAL_Delay(5U);
 
-    if (HAL_SAI_Receive_DMA(&hsai_BlockA2,
-                            (uint8_t *)dma_buf_a,
-                            AUDIO_DMA_BUFFER_SIZE) != HAL_OK)
+    if (HAL_SAI_Receive_DMA(
+            &hsai_BlockA2,
+            (uint8_t *)dma_buf_a,
+            AUDIO_DMA_BUFFER_SIZE
+        ) != HAL_OK)
     {
+        HAL_SAI_DMAStop(&hsai_BlockB2);
         ctx->error_count++;
         return -1;
     }
@@ -73,122 +127,295 @@ int audio_capture_start(AudioCaptureContext *ctx)
 
 int audio_capture_stop(AudioCaptureContext *ctx)
 {
-    if (!ctx) return -1;
+    if (ctx == NULL)
+    {
+        return -1;
+    }
+
     HAL_SAI_DMAStop(&hsai_BlockA2);
     HAL_SAI_DMAStop(&hsai_BlockB2);
+
     return 0;
 }
 
-void audio_capture_deinterleave(AudioCaptureContext *ctx, uint8_t half)
+void audio_capture_deinterleave(
+    AudioCaptureContext *ctx,
+    uint8_t half
+)
 {
-    if (!ctx) return;
-
-    uint32_t offset = (half == 0U) ? 0U : (AUDIO_DMA_BUFFER_SIZE / 2U);
-
-    /* ── DEBUG RAW — usa el mismo offset que el deinterleave ── */
-    static uint32_t dbg_count = 0;
-    if (++dbg_count >= 86) {
-        dbg_count = 0;
-
-        float db_b_par = 0, db_b_imp = 0, db_a_par = 0, db_a_imp = 0;
-        for (int i = 0; i < 64; i++) {
-            uint32_t idx = offset + (uint32_t)i * 2U;
-            float s;
-            s = (float)((int32_t)dma_buf_b[idx]     >> 8) / 8388608.0f; db_b_par += s*s;
-            s = (float)((int32_t)dma_buf_b[idx + 1] >> 8) / 8388608.0f; db_b_imp += s*s;
-            s = (float)((int32_t)dma_buf_a[idx]     >> 8) / 8388608.0f; db_a_par += s*s;
-            s = (float)((int32_t)dma_buf_a[idx + 1] >> 8) / 8388608.0f; db_a_imp += s*s;
-        }
-        db_b_par = (db_b_par > 1e-12f) ? 20.0f*log10f(sqrtf(db_b_par/64)) : -120.0f;
-        db_b_imp = (db_b_imp > 1e-12f) ? 20.0f*log10f(sqrtf(db_b_imp/64)) : -120.0f;
-        db_a_par = (db_a_par > 1e-12f) ? 20.0f*log10f(sqrtf(db_a_par/64)) : -120.0f;
-        db_a_imp = (db_a_imp > 1e-12f) ? 20.0f*log10f(sqrtf(db_a_imp/64)) : -120.0f;
-
-        printf("[RAW] B_par:%5.1f B_imp:%5.1f A_par:%5.1f A_imp:%5.1f dBFS\r\n",
-               db_b_par, db_b_imp, db_a_par, db_a_imp);
-    }
-    /* ─────────────────────────────────────────────────────── */
-
-    for (uint32_t i = 0; i < AUDIO_BUFFER_SIZE; i++)
+    if (ctx == NULL)
     {
-        uint32_t idx = offset + i * 2;
-        if (idx + 1 >= AUDIO_DMA_BUFFER_SIZE) break;
+        return;
+    }
 
-        ctx->ch0[i] = (int32_t)dma_buf_b[idx + 1]; /* Mic2 slot impar SEL=VCC */
-        ctx->ch1[i] = (int32_t)dma_buf_a[idx + 1]; /* Mic4 slot impar SEL=VCC */
-        ctx->ch2[i] = (int32_t)dma_buf_a[idx];      /* Mic3 slot par   SEL=GND */
-        ctx->ch3[i] = (int32_t)dma_buf_b[idx];      /* Mic1 slot par   SEL=GND */
+    /*
+     * Primera mitad:  palabras [0 .. 1023]
+     * Segunda mitad: palabras [1024 .. 2047]
+     *
+     * Cada mitad contiene:
+     *   512 tramas estereo x 2 palabras.
+     */
+    const uint32_t offset =
+        (half == 0U)
+            ? 0U
+            : (AUDIO_DMA_BUFFER_SIZE / 2U);
+
+    /* ---------------- DIAGNOSTICO RAW ---------------- */
+
+    static uint32_t debug_counter = 0U;
+
+    debug_counter++;
+
+    if (debug_counter >= 86U)
+    {
+        debug_counter = 0U;
+
+        float energy_b_even = 0.0f;
+        float energy_b_odd  = 0.0f;
+        float energy_a_even = 0.0f;
+        float energy_a_odd  = 0.0f;
+
+        for (uint32_t i = 0U; i < 64U; i++)
+        {
+            const uint32_t index =
+                offset + i * AUDIO_SLOTS_PER_FRAME;
+
+            const float b_even =
+                sai24_word_to_float(dma_buf_b[index]);
+
+            const float b_odd =
+                sai24_word_to_float(dma_buf_b[index + 1U]);
+
+            const float a_even =
+                sai24_word_to_float(dma_buf_a[index]);
+
+            const float a_odd =
+                sai24_word_to_float(dma_buf_a[index + 1U]);
+
+            energy_b_even += b_even * b_even;
+            energy_b_odd  += b_odd  * b_odd;
+            energy_a_even += a_even * a_even;
+            energy_a_odd  += a_odd  * a_odd;
+        }
+
+        const float db_b_even =
+            (energy_b_even > 1.0e-12f)
+                ? 20.0f * log10f(
+                    sqrtf(energy_b_even / 64.0f)
+                )
+                : -120.0f;
+
+        const float db_b_odd =
+            (energy_b_odd > 1.0e-12f)
+                ? 20.0f * log10f(
+                    sqrtf(energy_b_odd / 64.0f)
+                )
+                : -120.0f;
+
+        const float db_a_even =
+            (energy_a_even > 1.0e-12f)
+                ? 20.0f * log10f(
+                    sqrtf(energy_a_even / 64.0f)
+                )
+                : -120.0f;
+
+        const float db_a_odd =
+            (energy_a_odd > 1.0e-12f)
+                ? 20.0f * log10f(
+                    sqrtf(energy_a_odd / 64.0f)
+                )
+                : -120.0f;
+
+        printf(
+            "[RAW24] "
+            "B_par:%5.1f B_imp:%5.1f "
+            "A_par:%5.1f A_imp:%5.1f dBFS\r\n",
+            (double)db_b_even,
+            (double)db_b_odd,
+            (double)db_a_even,
+            (double)db_a_odd
+        );
+    }
+
+    /* ---------------- DESENTRELAZADO ---------------- */
+
+    for (uint32_t i = 0U;
+         i < AUDIO_BUFFER_SIZE;
+         i++)
+    {
+        const uint32_t index =
+            offset + i * AUDIO_SLOTS_PER_FRAME;
+
+        ctx->ch0[i] =
+            (int32_t)dma_buf_b[index + 1U];
+        /* Mic2: SAI B, slot impar, SEL=VCC */
+
+        ctx->ch1[i] =
+            (int32_t)dma_buf_a[index + 1U];
+        /* Mic4: SAI A, slot impar, SEL=VCC */
+
+        ctx->ch2[i] =
+            (int32_t)dma_buf_a[index];
+        /* Mic3: SAI A, slot par, SEL=GND */
+
+        ctx->ch3[i] =
+            (int32_t)dma_buf_b[index];
+        /* Mic1: SAI B, slot par, SEL=GND */
     }
 }
 
-AudioBufferState audio_capture_get_data(AudioCaptureContext *ctx)
+AudioBufferState audio_capture_get_data(
+    AudioCaptureContext *ctx
+)
 {
-    if (!ctx) return AUDIO_BUFFER_EMPTY;
-
-    if (ctx->dma_a_half)
+    if (ctx == NULL)
     {
-        ctx->dma_a_half = 0;
-        audio_capture_deinterleave(ctx, 0);
+        return AUDIO_BUFFER_EMPTY;
+    }
+
+    bool half_ready = false;
+    bool full_ready = false;
+
+    /*
+     * La comprobacion y limpieza de pares de flags se hace
+     * dentro de una seccion critica muy corta.
+     */
+    const uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+
+    if ((ctx->dma_a_half != 0U) &&
+        (ctx->dma_b_half != 0U))
+    {
+        ctx->dma_a_half = 0U;
+        ctx->dma_b_half = 0U;
+        half_ready = true;
+    }
+    else if ((ctx->dma_a_full != 0U) &&
+             (ctx->dma_b_full != 0U))
+    {
+        ctx->dma_a_full = 0U;
+        ctx->dma_b_full = 0U;
+        full_ready = true;
+    }
+
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+
+    if (half_ready)
+    {
+        audio_capture_deinterleave(ctx, 0U);
+
         ctx->buffer_state = AUDIO_BUFFER_HALF;
         ctx->frame_count++;
+
         return AUDIO_BUFFER_HALF;
     }
 
-    if (ctx->dma_a_full)
+    if (full_ready)
     {
-        ctx->dma_a_full = 0;
-        audio_capture_deinterleave(ctx, 1);
+        audio_capture_deinterleave(ctx, 1U);
+
         ctx->buffer_state = AUDIO_BUFFER_FULL;
         ctx->frame_count++;
+
         return AUDIO_BUFFER_FULL;
     }
 
     return AUDIO_BUFFER_EMPTY;
 }
 
-int32_t* audio_capture_get_channel(AudioCaptureContext *ctx, uint8_t channel)
+int32_t *audio_capture_get_channel(
+    AudioCaptureContext *ctx,
+    uint8_t channel
+)
 {
-    if (!ctx || channel >= AUDIO_CHANNELS) return NULL;
+    if ((ctx == NULL) ||
+        (channel >= AUDIO_CHANNELS))
+    {
+        return NULL;
+    }
+
     switch (channel)
     {
-        case 0: return ctx->ch0; /* Mic2 */
-        case 1: return ctx->ch1; /* Mic4 */
-        case 2: return ctx->ch2; /* Mic3 */
-        case 3: return ctx->ch3; /* Mic1 */
-        default: return NULL;
+        case 0U:
+            return ctx->ch0; /* Mic2 */
+
+        case 1U:
+            return ctx->ch1; /* Mic4 */
+
+        case 2U:
+            return ctx->ch2; /* Mic3 */
+
+        case 3U:
+            return ctx->ch3; /* Mic1 */
+
+        default:
+            return NULL;
     }
 }
 
-void audio_capture_get_stats(AudioCaptureContext *ctx,
-                             uint32_t *frames_processed,
-                             uint32_t *errors)
+void audio_capture_get_stats(
+    AudioCaptureContext *ctx,
+    uint32_t *frames_processed,
+    uint32_t *errors
+)
 {
-    if (!ctx) return;
-    if (frames_processed) *frames_processed = ctx->frame_count;
-    if (errors)           *errors           = ctx->error_count;
+    if (ctx == NULL)
+    {
+        return;
+    }
+
+    if (frames_processed != NULL)
+    {
+        *frames_processed = ctx->frame_count;
+    }
+
+    if (errors != NULL)
+    {
+        *errors = ctx->error_count;
+    }
 }
 
-void HAL_SAI_RxHalfCpltCallback(SAI_HandleTypeDef *hsai)
+void HAL_SAI_RxHalfCpltCallback(
+    SAI_HandleTypeDef *hsai
+)
 {
     sai_half_count++;
-    if (hsai == &hsai_BlockA2) g_audio_ctx.dma_a_half = 1;
-    if (hsai == &hsai_BlockB2) {
-        g_audio_ctx.dma_b_half = 1;
+
+    if (hsai == &hsai_BlockA2)
+    {
+        g_audio_ctx.dma_a_half = 1U;
+    }
+    else if (hsai == &hsai_BlockB2)
+    {
+        g_audio_ctx.dma_b_half = 1U;
         block_b_half_count++;
     }
 }
 
-void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai)
+void HAL_SAI_RxCpltCallback(
+    SAI_HandleTypeDef *hsai
+)
 {
     sai_full_count++;
-    if (hsai == &hsai_BlockA2) g_audio_ctx.dma_a_full = 1;
-    if (hsai == &hsai_BlockB2) {
-        g_audio_ctx.dma_b_full = 1;
+
+    if (hsai == &hsai_BlockA2)
+    {
+        g_audio_ctx.dma_a_full = 1U;
+    }
+    else if (hsai == &hsai_BlockB2)
+    {
+        g_audio_ctx.dma_b_full = 1U;
         block_b_full_count++;
     }
 }
 
-void HAL_SAI_ErrorCallback(SAI_HandleTypeDef *hsai)
+void HAL_SAI_ErrorCallback(
+    SAI_HandleTypeDef *hsai
+)
 {
     (void)hsai;
     g_audio_ctx.error_count++;
