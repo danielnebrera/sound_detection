@@ -1,11 +1,13 @@
-/* USER CODE BEGIN Header */
-/**
-  ******************************************************************************
-  * @file           : main.c
-  * @brief          : Main program body with audio capture on CM7
-  ******************************************************************************
-  */
-/* USER CODE END Header */
+/* =================================================================
+ * main.c — Modo grabación de audio (sin detección)
+ * Graba chunks de 3s de 4 canales y los emite por UART.
+ *
+ * CAMBIOS respecto al main.c original:
+ *   1. usart.c → 921600 baud
+ *   2. Se incluye audio_recorder.h
+ *   3. El loop principal usa audio_recorder en lugar de drone_detection
+ *   4. Responde a 'RECORD\n' y 'STOP\n' por UART
+ * ================================================================= */
 #include "main.h"
 #include "dma.h"
 #include "i2c.h"
@@ -13,37 +15,28 @@
 #include "usart.h"
 #include "gpio.h"
 
-/* USER CODE BEGIN Includes */
 #include "audio_capture.h"
-#include "flash_logger.h"
-#include "stm32h7xx.h"
-#include <string.h>
-#include "drone_detection.h"
+#include "audio_recorder.h"
 #include "fdcan.h"
 #include "can_sender.h"
-/* USER CODE END Includes */
+#include "stm32h7xx.h"
+#include <stdio.h>
+#include <string.h>
 
-/* USER CODE BEGIN PV */
 extern volatile uint32_t sai_half_count;
 extern volatile uint32_t sai_full_count;
 extern volatile uint32_t dma_irq_count;
-/* USER CODE END PV */
 
 void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
 static void MPU_Config(void);
 
-/* USER CODE BEGIN 0 */
 #define LED_ON(pin)     HAL_GPIO_WritePin(GPIOK, pin, GPIO_PIN_RESET)
 #define LED_OFF(pin)    HAL_GPIO_WritePin(GPIOK, pin, GPIO_PIN_SET)
 #define LED_TOGGLE(pin) HAL_GPIO_TogglePin(GPIOK, pin)
-/* USER CODE END 0 */
 
 int main(void)
 {
-  /* USER CODE BEGIN 1 */
-  /* USER CODE END 1 */
-
 #if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
   int32_t timeout;
 #endif
@@ -57,13 +50,6 @@ int main(void)
 #endif
 
   HAL_Init();
-
-  /* USER CODE BEGIN Init */
-  MX_USART1_UART_Init();
-  HAL_UART_Transmit(&huart1, (uint8_t*)"UART_INIT_OK\r\n", 14, 100);
-  HAL_UART_Transmit(&huart1, (uint8_t*)"BOOT\r\n", 6, 100);
-  /* USER CODE END Init */
-
   SystemClock_Config();
   PeriphCommonClock_Config();
 
@@ -80,33 +66,33 @@ int main(void)
   MX_DMA_Init();
   MX_SAI2_Init();
   MX_USART1_UART_Init();
+  HAL_UART_Transmit(&huart1, (uint8_t*)"UART_INIT_OK\r\n", 14, 100);
+  HAL_UART_Transmit(&huart1, (uint8_t*)"BOOT\r\n", 6, 100);
   MX_I2C1_Init();
   MX_FDCAN1_Init();
 
-  /* USER CODE BEGIN 2 */
   LED_OFF(GPIO_PIN_5);
   LED_OFF(GPIO_PIN_6);
   LED_OFF(GPIO_PIN_7);
 
-  /* ── Causa del reset ─────────────────────────────────────── */
+  /* ── Causa del reset ───────────────────────────────────────── */
   {
     uint32_t rsr = RCC->RSR;
     printf("[RESET] RSR=0x%08lX POR=%lu PIN=%lu SW=%lu IWDG=%lu WWDG=%lu\r\n",
            (unsigned long)rsr,
            (unsigned long)((rsr & RCC_RSR_PORRSTF)   != 0U),
            (unsigned long)((rsr & RCC_RSR_PINRSTF)   != 0U),
-           (unsigned long)((rsr & RCC_RSR_SFT2RSTF)   != 0U),
+           (unsigned long)((rsr & RCC_RSR_SFT2RSTF)  != 0U),
            (unsigned long)((rsr & RCC_RSR_IWDG1RSTF) != 0U),
            (unsigned long)((rsr & RCC_RSR_WWDG1RSTF) != 0U));
     __HAL_RCC_CLEAR_RESET_FLAGS();
   }
-  /* ─────────────────────────────────────────────────────────── */
 
-  if (!can_sender_init()) {
-     printf("[MAIN] ERROR: CAN no pudo iniciar\r\n");
-  }
+  /* ── CAN ───────────────────────────────────────────────────── */
+  if (!can_sender_init())
+    printf("[MAIN] WARN: CAN no pudo iniciar\r\n");
 
-  /* --- ENCENDIDO PMIC LDO2 (3.3V para micrófonos) --- */
+  /* ── PMIC LDO2 (3.3V micrófonos) ──────────────────────────── */
   {
     uint8_t pmic_addr     = 0x08 << 1;
     uint8_t set_volt[2]   = {0x51, 0x0F};
@@ -120,34 +106,24 @@ int main(void)
       printf("PMIC: LDO2 ERROR r1=%d r2=%d\r\n", (int)r1, (int)r2);
   }
 
-  printf("CM7: arranque OK\r\n");
-
-  if (audio_capture_init(&g_audio_ctx) != 0)
-  {
+  /* ── Audio capture ─────────────────────────────────────────── */
+  if (audio_capture_init(&g_audio_ctx) != 0) {
     printf("CM7: ERROR audio_capture_init\r\n");
     while(1) { LED_TOGGLE(GPIO_PIN_7); HAL_Delay(500); }
   }
   printf("CM7: audio_capture_init OK\r\n");
 
-  int result = audio_capture_start(&g_audio_ctx);
-  if (result != 0)
-  {
-    printf("CM7: ERROR audio_capture_start result=%d\r\n", result);
+  if (audio_capture_start(&g_audio_ctx) != 0) {
+    printf("CM7: ERROR audio_capture_start\r\n");
     while(1) { LED_TOGGLE(GPIO_PIN_5); HAL_Delay(200); }
   }
   printf("CM7: audio_capture_start OK\r\n");
 
-  /* ── Registros post-DMA ──────────────────────────────────── */
   printf("[SAI_RUN] A_CR1=0x%08lX A_SR=0x%08lX B_CR1=0x%08lX B_SR=0x%08lX\r\n",
          (unsigned long)SAI2_Block_A->CR1,
          (unsigned long)SAI2_Block_A->SR,
          (unsigned long)SAI2_Block_B->CR1,
          (unsigned long)SAI2_Block_B->SR);
-  /* ─────────────────────────────────────────────────────────── */
-
-  if (!drone_detection_init()) {
-      printf("[MAIN] ERROR: deteccion no pudo iniciar\r\n");
-  }
 
   HAL_Delay(100);
   if (hsai_BlockA2.State == HAL_SAI_STATE_BUSY_RX)
@@ -155,30 +131,67 @@ int main(void)
   else
     printf("CM7: SAI NO esta en BUSY_RX\r\n");
 
+  /* ── Esperar comando de Python ────────────────────────────── */
+  printf("[UART_RX] esperando byte...\r\n");
+  {
+    uint8_t c = 0;
+    while (HAL_UART_Receive(&huart1, &c, 1, 500) != HAL_OK) {
+      LED_TOGGLE(GPIO_PIN_6);
+    }
+    /* Drenar buffer */
+    HAL_Delay(20);
+    while (HAL_UART_Receive(&huart1, &c, 1, 5) == HAL_OK) {}
+    printf("CM7: comando recibido, iniciando grabacion\r\n");
+  }
+
+  /* ── Iniciar grabador ──────────────────────────────────────── */
+  printf("[DBG] antes de audio_recorder_init\r\n");
+  audio_recorder_init();
+  printf("[DBG] despues de audio_recorder_init\r\n");
+
   LED_OFF(GPIO_PIN_5);
   LED_OFF(GPIO_PIN_6);
   LED_OFF(GPIO_PIN_7);
-  printf("CM7: entrando al loop\r\n");
-  /* USER CODE END 2 */
 
-  /* USER CODE BEGIN WHILE */
+  /* ── Loop principal ────────────────────────────────────────── */
+  int chunk_num = 1;
+  printf("[GRABANDO] Chunk %d — acercar audio ahora (4 mics simultaneos)\r\n",
+         chunk_num);
+
   while (1)
   {
-      AudioBufferState state = audio_capture_get_data(&g_audio_ctx);
+    AudioBufferState state = audio_capture_get_data(&g_audio_ctx);
 
-      if (state == AUDIO_BUFFER_HALF || state == AUDIO_BUFFER_FULL)
+    if (state == AUDIO_BUFFER_HALF || state == AUDIO_BUFFER_FULL)
+    {
+      LED_TOGGLE(GPIO_PIN_5);
+      audio_recorder_accumulate();
+
+      if (audio_recorder_is_ready())
       {
-          LED_TOGGLE(GPIO_PIN_5);
-          drone_detection_accumulate();
-          if (drone_detection_is_ready())
-          {
-              LED_TOGGLE(GPIO_PIN_6);
-              drone_detection_process();
-          }
+        printf("[CHUNK_LISTO] Chunk %d grabado — transmitiendo...\r\n", chunk_num);
+        LED_ON(GPIO_PIN_6);
+        bool cont = audio_recorder_emit_and_reset();
+        LED_OFF(GPIO_PIN_6);
+
+        printf("[CHUNK_GUARDADO] Chunk %d completado (4 canales x %ds)\r\n",
+               chunk_num, RECORD_SECONDS);
+        chunk_num++;
+        printf("[GRABANDO] Chunk %d — acercar audio ahora\r\n", chunk_num);
+
+        if (!cont || audio_recorder_stop_requested()) {
+          printf("[RECORD_DONE]\r\n");
+          LED_ON(GPIO_PIN_7);
+          audio_capture_stop(&g_audio_ctx);
+          while(1) { HAL_Delay(1000); }
+        }
       }
+    }
   }
-  /* USER CODE END WHILE */
 }
+
+/* ── SystemClock_Config, PeriphCommonClock_Config, MPU_Config ── */
+/* (idénticas al main.c original — copiadas sin cambios)          */
 
 void SystemClock_Config(void)
 {
@@ -213,7 +226,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_2;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
   RCC_OscInitStruct.PLL.PLLFRACN = 0;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) { Error_Handler(); }
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) Error_Handler();
 
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
                               | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2
@@ -225,7 +238,7 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
   RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK) { Error_Handler(); }
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK) Error_Handler();
 }
 
 void PeriphCommonClock_Config(void)
@@ -241,7 +254,7 @@ void PeriphCommonClock_Config(void)
   PeriphClkInitStruct.PLL3.PLL3VCOSEL = RCC_PLL3VCOWIDE;
   PeriphClkInitStruct.PLL3.PLL3FRACN = 2077;
   PeriphClkInitStruct.Sai23ClockSelection = RCC_SAI23CLKSOURCE_PLL3;
-  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK) { Error_Handler(); }
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK) Error_Handler();
 }
 
 void MPU_Config(void)
@@ -290,8 +303,7 @@ void MPU_Config(void)
 void Error_Handler(void)
 {
   __disable_irq();
-  while(1)
-  {
+  while(1) {
     HAL_GPIO_TogglePin(GPIOK, GPIO_PIN_5);
     for(volatile uint32_t i = 0; i < 1000000; i++) {}
     HAL_GPIO_TogglePin(GPIOK, GPIO_PIN_7);

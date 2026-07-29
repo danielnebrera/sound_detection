@@ -366,9 +366,12 @@
 							<outputType id="org.eclipse.cdt.managedbuilder.ui.rcbs.outputtype.833036966" name="Resource Custom Build Step Output Type"/>
 						</tool>
 					</fileInfo>
+					<fileInfo id="com.st.stm32cube.ide.mcu.gnu.managedbuild.config.exe.debug.280987664.351586770" name="model_runner_stm32.cpp" rcbsApplicability="disable" resourcePath="Core/Src/model_runner_stm32.cpp" toolsToInvoke="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.cpp.compiler.1554684274.877708737">
+						<tool id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.cpp.compiler.1554684274.877708737" name="MCU/MPU G++ Compiler" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.cpp.compiler.1554684274"/>
+					</fileInfo>
 					<sourceEntries>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Common"/>
-						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Core"/>
+						<entry excluding="Src/model_runner_stm32.cpp|Src/mfcc_stm32.c|Src/drone_detection.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Core"/>
 						<entry excluding="CMSIS_DSP_Transform/arm_bitreversal2.S|CMSIS_DSP_Transform/arm_cfft_f64.c|CMSIS_DSP_Transform/arm_cfft_init_f16.c|CMSIS_DSP_Transform/arm_cfft_f16.c|CMSIS_DSP_Transform/arm_bitreversal2.c|CMSIS_DSP_Transform/arm_bitreversal_f16.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Drivers"/>
 						<entry excluding="tensorflow/tensorflow/lite/kernels/padding.h|tensorflow/tensorflow/lite/kernels/op_macros.h|tensorflow/tensorflow/lite/kernels/kernel_util.h" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Middlewares"/>
 						<entry excluding="debug_log_imp.cc|app_x-cube-ai.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="X-CUBE-AI/App"/>

@@ -29,6 +29,9 @@
 #define HSEM_ID_0 (0U)
 #endif
 #endif
+
+#define CAPTURE_LOG_FRAMES   ((AUDIO_SAMPLE_RATE * 3) / AUDIO_BUFFER_SIZE)
+#define CAPTURE_LOG_SAMPLES  32
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -121,14 +124,37 @@ int main(void)
   printf("DMA Buffer Size: %d samples\n\n", AUDIO_DMA_BUFFER_SIZE);
   /* USER CODE END 2 */
 
-  /* Infinite loop */
+  /* Capture 3 s, then dump JSON once, then stop */
   /* USER CODE BEGIN WHILE */
-  while (1)
   {
-    /* USER CODE END WHILE */
+    uint32_t cap_frames = 0;
+    while (cap_frames < CAPTURE_LOG_FRAMES)
+    {
+        if (audio_capture_get_data(&g_audio_ctx) != AUDIO_BUFFER_EMPTY)
+            cap_frames++;
+    }
+    audio_capture_stop(&g_audio_ctx);
 
-    /* USER CODE BEGIN 3 */
+    flash_log("{\"sr\":%u,\"n\":%u,", (unsigned)AUDIO_SAMPLE_RATE, (unsigned)CAPTURE_LOG_SAMPLES);
+    flash_log("\"ch0\":[");
+    for (int i = 0; i < CAPTURE_LOG_SAMPLES; i++)
+        flash_log(i ? ",%ld" : "%ld", (long)g_audio_ctx.ch0[i]);
+    flash_log("],\"ch1\":[");
+    for (int i = 0; i < CAPTURE_LOG_SAMPLES; i++)
+        flash_log(i ? ",%ld" : "%ld", (long)g_audio_ctx.ch1[i]);
+    flash_log("],\"ch2\":[");
+    for (int i = 0; i < CAPTURE_LOG_SAMPLES; i++)
+        flash_log(i ? ",%ld" : "%ld", (long)g_audio_ctx.ch2[i]);
+    flash_log("],\"ch3\":[");
+    for (int i = 0; i < CAPTURE_LOG_SAMPLES; i++)
+        flash_log(i ? ",%ld" : "%ld", (long)g_audio_ctx.ch3[i]);
+    flash_log("]}\n");
+    flash_log("CM4: done\n");
   }
+  /* USER CODE END WHILE */
+
+  /* USER CODE BEGIN 3 */
+  while (1) { }
   /* USER CODE END 3 */
 }
 
