@@ -1,8 +1,19 @@
 /* =================================================================
- * audio_recorder.c
+ * audio_recorder.c — transmisión BINARIA con CRC32
  *
- * Captura 4 canales simultáneos durante exactamente RECORD_FRAMES.
- * Buffer único intercalado en RAM D1.
+ * Protocolo por canal:
+ *   [CHx_BIN]\r\n              ← header ASCII (10 bytes)
+ *   <88200 bytes int16 LE>     ← payload binario (44100 × 2)
+ *   <4 bytes CRC32 LE>         ← checksum del payload
+ *   [CHx_END] sent=44100 errors=0\r\n  ← confirmación ASCII
+ *
+ * Flujo completo:
+ *   [CHUNK_START] 44100\r\n
+ *   [CH0_BIN]\r\n <payload+CRC>  [CH0_END] sent=44100 errors=0\r\n
+ *   [CH1_BIN]\r\n <payload+CRC>  [CH1_END] ...
+ *   [CH2_BIN]\r\n <payload+CRC>  [CH2_END] ...
+ *   [CH3_BIN]\r\n <payload+CRC>  [CH3_END] ...
+ *   [CHUNK_END]\r\n
  * ================================================================= */
 
 #include "audio_recorder.h"
@@ -21,6 +32,18 @@ static uint32_t s_write_frame = 0;
 static bool     s_chunk_ready = false;
 static bool     s_stop        = false;
 
+/* ── CRC32 (polinomio IEEE 802.3) ────────────────────────────────── */
+static uint32_t crc32_update(uint32_t crc, const uint8_t *buf, uint32_t len)
+{
+    crc = ~crc;
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= buf[i];
+        for (int b = 0; b < 8; b++)
+            crc = (crc >> 1) ^ (0xEDB88320u & -(crc & 1u));
+    }
+    return ~crc;
+}
+
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
 static inline int16_t pcm24_to_pcm16(int32_t value)
@@ -36,32 +59,6 @@ static void uart_puts(const char *s)
     HAL_UART_Transmit(&huart1, (uint8_t*)s, strlen(s), HAL_MAX_DELAY);
 }
 
-static void emit_hex(int32_t val)
-{
-    char buf[11];
-    uint32_t w = (uint32_t)val;
-    static const char h[] = "0123456789ABCDEF";
-    buf[0]=h[(w>>28)&0xF]; buf[1]=h[(w>>24)&0xF];
-    buf[2]=h[(w>>20)&0xF]; buf[3]=h[(w>>16)&0xF];
-    buf[4]=h[(w>>12)&0xF]; buf[5]=h[(w>> 8)&0xF];
-    buf[6]=h[(w>> 4)&0xF]; buf[7]=h[(w>> 0)&0xF];
-    buf[8]='\r'; buf[9]='\n'; buf[10]='\0';
-    HAL_UART_Transmit(&huart1, (uint8_t*)buf, 10, HAL_MAX_DELAY);
-}
-
-static HAL_StatusTypeDef emit_hex_status(int32_t val)
-{
-    char buf[11];
-    uint32_t w = (uint32_t)val;
-    static const char h[] = "0123456789ABCDEF";
-    buf[0]=h[(w>>28)&0xF]; buf[1]=h[(w>>24)&0xF];
-    buf[2]=h[(w>>20)&0xF]; buf[3]=h[(w>>16)&0xF];
-    buf[4]=h[(w>>12)&0xF]; buf[5]=h[(w>> 8)&0xF];
-    buf[6]=h[(w>> 4)&0xF]; buf[7]=h[(w>> 0)&0xF];
-    buf[8]='\r'; buf[9]='\n'; buf[10]='\0';
-    return HAL_UART_Transmit(&huart1, (uint8_t*)buf, 10, HAL_MAX_DELAY);
-}
-
 static bool check_stop(void)
 {
     uint8_t c = 0;
@@ -70,25 +67,60 @@ static bool check_stop(void)
     return s_stop;
 }
 
-static void emit_channel(int ch)
+/* Emite un canal completo en binario con CRC32 */
+static void emit_channel_binary(int ch)
 {
-    char hdr[48];
+    char hdr[32];
     const char *names[] = {"CH0","CH1","CH2","CH3"};
 
-    snprintf(hdr, sizeof(hdr), "[%s_START]\r\n", names[ch]);
+    /* Header ASCII */
+    snprintf(hdr, sizeof(hdr), "[%s_BIN]\r\n", names[ch]);
     uart_puts(hdr);
 
+    /* Payload: 44100 muestras int16 little-endian en bloques de 512 */
+    #define TX_BLOCK 512
+    uint8_t  tx_buf[TX_BLOCK * 2];
+    uint32_t crc    = 0;
     uint32_t sent   = 0;
     uint32_t errors = 0;
+    uint32_t i      = 0;
 
-    for (uint32_t i = 0; i < RECORD_FRAMES; i++) {
-        int32_t val = ((int32_t)s_chunk.samples[i][ch]) << 8;
-        HAL_StatusTypeDef st = emit_hex_status(val);
-        if (st == HAL_OK) sent++;
-        else              errors++;
+    while (i < RECORD_FRAMES && !s_stop)
+    {
+        uint32_t block = RECORD_FRAMES - i;
+        if (block > TX_BLOCK) block = TX_BLOCK;
+
+        /* Empaquetar int16 LE */
+        for (uint32_t j = 0; j < block; j++) {
+            int16_t v = s_chunk.samples[i + j][ch];
+            tx_buf[j * 2]     = (uint8_t)(v & 0xFF);
+            tx_buf[j * 2 + 1] = (uint8_t)((v >> 8) & 0xFF);
+        }
+
+        uint32_t bytes = block * 2;
+        crc = crc32_update(crc, tx_buf, bytes);
+
+        HAL_StatusTypeDef st =
+            HAL_UART_Transmit(&huart1, tx_buf, bytes, HAL_MAX_DELAY);
+
+        if (st == HAL_OK) sent   += block;
+        else              errors += block;
+
+        i += block;
+
         if (i % 10000 == 0) check_stop();
     }
 
+    /* CRC32 little-endian (4 bytes) */
+    uint8_t crc_buf[4] = {
+        (uint8_t)(crc & 0xFF),
+        (uint8_t)((crc >> 8)  & 0xFF),
+        (uint8_t)((crc >> 16) & 0xFF),
+        (uint8_t)((crc >> 24) & 0xFF)
+    };
+    HAL_UART_Transmit(&huart1, crc_buf, 4, HAL_MAX_DELAY);
+
+    /* Confirmación ASCII */
     snprintf(hdr, sizeof(hdr), "[%s_END] sent=%lu errors=%lu\r\n",
              names[ch], (unsigned long)sent, (unsigned long)errors);
     uart_puts(hdr);
@@ -158,11 +190,10 @@ bool audio_recorder_emit_and_reset(void)
     uart_puts(hdr);
 
     for (int ch = 0; ch < (int)RECORD_CHANNELS && !s_stop; ch++)
-        emit_channel(ch);
+        emit_channel_binary(ch);
 
     uart_puts("[CHUNK_END]\r\n");
 
-    /* Reiniciar para el siguiente chunk */
     memset(&s_chunk, 0, sizeof(s_chunk));
     s_write_frame = 0;
     s_chunk_ready = false;

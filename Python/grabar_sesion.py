@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-grabar_sesion.py
+grabar_sesion.py — transmisión BINARIA con CRC32
 
-Graba audio del STM32 (4 mics) en chunks exactos de 1 segundo.
-Chunks incompletos se descartan automaticamente.
+Protocolo por canal:
+  [CHx_BIN]\r\n              header ASCII
+  <88200 bytes int16 LE>     payload binario (44100 x 2)
+  <4 bytes CRC32 LE>         checksum
+  [CHx_END] sent=44100 errors=0\r\n  confirmacion ASCII
 
-Mapeo validado por desconexion fisica DOUT:
-  CH0 -> dma_buf_b[idx+1] -> Mic2 (B_odd,  SEL=VCC) OK
-  CH1 -> dma_buf_a[idx+1] -> Mic4 (A_odd,  SEL=VCC) OK
-  CH2 -> dma_buf_a[idx]   -> Mic3 (A_even, SEL=GND) interferencia
-  CH3 -> dma_buf_b[idx]   -> Mic1 (B_even, SEL=GND) interferencia
-
-Nombre de archivo:
-    json_test/session_<S>_ord<O>_mic<M>.json
+Mapeo CH → microfono fisico:
+  CH0 → Mic2 (B_odd,  SEL=VCC)
+  CH1 → Mic4 (A_odd,  SEL=VCC)
+  CH2 → Mic3 (A_even, SEL=GND)
+  CH3 → Mic1 (B_even, SEL=GND)
 
 Uso:
     python grabar_sesion.py --port COM6 --session 1 --baud 921600
     python grabar_sesion.py --port COM6 --session 2 --start-order 4 --baud 921600
-    python grabar_sesion.py --session 1   # simulacion sin STM32
+    python grabar_sesion.py --session 1   # simulacion
 """
 
 import argparse
@@ -26,6 +26,9 @@ import os
 import sys
 import time
 import signal
+import struct
+import zlib
+import random
 
 try:
     import serial
@@ -34,108 +37,255 @@ except ImportError:
     sys.exit(1)
 
 # ── Configuracion ─────────────────────────────────────────────────────────────
-SAMPLE_RATE   = 44100
-OUTPUT_DIR    = "json_test/sound"
-CHUNK_SECS    = 1
-SAMPLES_CHUNK = SAMPLE_RATE * CHUNK_SECS   # 44100 muestras por canal
+SAMPLE_RATE    = 44100
+OUTPUT_ROOT    = "json_test"
+OUTPUT_DIR     = os.path.join(OUTPUT_ROOT, "sound")
+METADATA_DIR   = OUTPUT_ROOT
+CHUNK_SECS     = 1
+CHUNK_MS       = int(round(CHUNK_SECS * 1000))
+SAMPLES_CHUNK  = SAMPLE_RATE * CHUNK_SECS        # 44100
+PAYLOAD_BYTES  = SAMPLES_CHUNK * 2               # 88200 bytes int16
+CRC_BYTES      = 4
+CHANNEL_BYTES  = PAYLOAD_BYTES + CRC_BYTES       # 88204
 
-# Mapeo CH → microfono fisico real
+# Mapeo validado:
+# CH0 -> Mic2 -> left
+# CH1 -> Mic4 -> top
+# CH2 -> Mic3 -> back
+# CH3 -> Mic1 -> right
 MICS = {
-    0: {"mic_id": 2, "mic_name": "Mic2_B_odd_SEL_VCC"},   # CH0 = Mic2 fisico
-    1: {"mic_id": 4, "mic_name": "Mic4_A_odd_SEL_VCC"},   # CH1 = Mic4 fisico
-    2: {"mic_id": 3, "mic_name": "Mic3_A_even_SEL_GND"},  # CH2 = Mic3 fisico
-    3: {"mic_id": 1, "mic_name": "Mic1_B_even_SEL_GND"},  # CH3 = Mic1 fisico
+    0: {"mic_id": 2, "mic_name": "left"},
+    1: {"mic_id": 4, "mic_name": "top"},
+    2: {"mic_id": 3, "mic_name": "back"},
+    3: {"mic_id": 1, "mic_name": "right"},
 }
 
-CH_TAGS = ["CH0", "CH1", "CH2", "CH3"]
+# Valores provisionales hasta integrar la deteccion real.
+PLACEHOLDER_SOUND_CLASS_ID = 0
+PLACEHOLDER_PROBABILITY    = 0
+
+CH_BIN_TAGS = ["[CH0_BIN]", "[CH1_BIN]", "[CH2_BIN]", "[CH3_BIN]"]
+CH_END_TAGS = ["[CH0_END]", "[CH1_END]", "[CH2_END]", "[CH3_END]"]
 
 # ── Utilidades ────────────────────────────────────────────────────────────────
 
-def sai24_to_int(word: int) -> int:
-    s = word & 0x00FFFFFF
-    if s & 0x00800000:
-        s |= 0xFF000000
-    if s > 0x7FFFFFFF:
-        s -= 0x100000000
-    return s
+def crc32_check(data: bytes, expected: int) -> bool:
+    calc = zlib.crc32(data) & 0xFFFFFFFF
+    return calc == expected
 
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
-def filename(session_id: int, order: int, mic_id: int) -> str:
-    return f"session_{session_id}_ord{order:04d}_mic{mic_id}.json"
+def filename(session_id: int, order: int, mic_name: str) -> str:
+    """Nombre exacto usado por sound_path en audio_metadata."""
+    return f"sound_s{session_id}_ord{order}_{mic_name}.json"
 
-def save_chunk(channels: dict, session_id: int, order: int, out_dir: str):
-    """Guarda 4 JSONs (uno por mic) para un chunk completo."""
-    for ch_idx, mic in MICS.items():
-        samples = channels[ch_idx]
-        n = len(samples)
 
-        if n < SAMPLES_CHUNK - 100:
-            print(f"\n[WARN] ch{ch_idx} muy corto: {n}/{SAMPLES_CHUNK} — descartado")
-            return False
+def metadata_filename(session_id: int) -> str:
+    return f"audio_metadata_s{session_id}.json"
 
-        # Truncar o rellenar hasta exactamente SAMPLES_CHUNK
-        if n > SAMPLES_CHUNK:
-            samples = samples[:SAMPLES_CHUNK]
-        elif n < SAMPLES_CHUNK:
-            samples = samples + [0] * (SAMPLES_CHUNK - n)
 
-        norm  = [s / 8388608.0 for s in samples]
-        fname = filename(session_id, order, mic["mic_id"])
-        fpath = os.path.join(out_dir, fname)
-        with open(fpath, "w") as f:
-            json.dump(norm, f, separators=(",", ":"))
+def _placeholder_intensity_db(session_id: int, order: int, mic_id: int) -> float:
+    """Valor provisional determinista; reemplazar por la deteccion real."""
+    seed = (session_id * 1_000_003) + (order * 101) + mic_id
+    rng = random.Random(seed)
+    return round(rng.uniform(35.0, 85.0), 2)
 
-    return True
+
+def _new_metadata(session_id: int) -> dict:
+    return {
+        "session_id": session_id,
+        "mics": [
+            {
+                "mic_name": mic["mic_name"],
+                "mic_id": mic["mic_id"],
+                "sound": [],
+            }
+            for mic in sorted(MICS.values(), key=lambda item: item["mic_id"])
+        ],
+    }
+
+
+def load_metadata(path: str, session_id: int) -> dict:
+    if not os.path.exists(path):
+        return _new_metadata(session_id)
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"No se pudo leer metadata existente: {exc}") from exc
+
+    if data.get("session_id") != session_id:
+        raise RuntimeError(
+            f"El metadata contiene session_id={data.get('session_id')} "
+            f"pero se solicito session_id={session_id}"
+        )
+
+    existing_by_id = {
+        int(item.get("mic_id")): item
+        for item in data.get("mics", [])
+        if isinstance(item, dict) and "mic_id" in item
+    }
+
+    normalized_mics = []
+    for mic in sorted(MICS.values(), key=lambda item: item["mic_id"]):
+        item = existing_by_id.get(mic["mic_id"], {})
+        normalized_mics.append({
+            "mic_name": mic["mic_name"],
+            "mic_id": mic["mic_id"],
+            "sound": list(item.get("sound", [])),
+        })
+
+    data["mics"] = normalized_mics
+    return data
+
+
+def next_metadata_id(metadata: dict) -> int:
+    ids = [
+        int(sound["id"])
+        for mic in metadata.get("mics", [])
+        for sound in mic.get("sound", [])
+        if isinstance(sound, dict) and "id" in sound
+    ]
+    return max(ids, default=0) + 1
+
+
+def upsert_metadata_chunk(metadata: dict, session_id: int, order: int, next_id: int) -> int:
+    """Agrega o actualiza las cuatro entradas del chunk completo."""
+    mic_objects = {int(item["mic_id"]): item for item in metadata["mics"]}
+    rel_timestamp = (order - 1) * CHUNK_MS
+
+    for mic in sorted(MICS.values(), key=lambda item: item["mic_id"]):
+        mic_id = mic["mic_id"]
+        mic_name = mic["mic_name"]
+        mic_obj = mic_objects[mic_id]
+
+        existing = next(
+            (
+                item for item in mic_obj["sound"]
+                if int(item.get("order_number", -1)) == order
+            ),
+            None,
+        )
+
+        if existing is None:
+            sound_id = next_id
+            next_id += 1
+            existing = {}
+            mic_obj["sound"].append(existing)
+        else:
+            sound_id = int(existing.get("id", next_id))
+            if "id" not in existing:
+                next_id += 1
+
+        audio_name = filename(session_id, order, mic_name)
+        existing.clear()
+        existing.update({
+            "id": sound_id,
+            "sound_path": f"sound/{audio_name}",
+            "order_number": order,
+            "rel_timestamp": rel_timestamp,
+            "sound_class_id": PLACEHOLDER_SOUND_CLASS_ID,
+            "intensity_db": _placeholder_intensity_db(session_id, order, mic_id),
+            "probability_percent": PLACEHOLDER_PROBABILITY,
+        })
+        mic_obj["sound"].sort(key=lambda item: int(item.get("order_number", 0)))
+
+    return next_id
+
+
+def save_metadata_atomic(metadata: dict, path: str) -> None:
+    temp_path = path + ".tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=4, allow_nan=False)
+        handle.write("\n")
+    os.replace(temp_path, path)
+
+
+def save_chunk(channels: dict, session_id: int, order: int, out_dir: str) -> bool:
+    sizes = [len(channels[ch]) for ch in range(4)]
+    if any(s != SAMPLES_CHUNK for s in sizes):
+        print(f"\n[WARN] Chunk {order} incompleto {sizes} — descartado")
+        return False
+
+    pending = []
+    try:
+        for ch_idx, mic in MICS.items():
+            samples     = channels[ch_idx]
+            norm        = [s / 32768.0 for s in samples]   # int16 → float [-1, 1)
+            fname       = filename(session_id, order, mic["mic_name"])
+            final_path  = os.path.join(out_dir, fname)
+            temp_path   = final_path + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(norm, f, separators=(",", ":"), allow_nan=False)
+            pending.append((temp_path, final_path))
+
+        for tmp, final in pending:
+            os.replace(tmp, final)
+        return True
+
+    except Exception as exc:
+        print(f"\n[ERROR] save_chunk: {exc}")
+        for tmp, _ in pending:
+            try:
+                if os.path.exists(tmp): os.remove(tmp)
+            except OSError:
+                pass
+        return False
 
 
 # ── Sesion de grabacion ───────────────────────────────────────────────────────
 
 class GrabacionSession:
 
-    def __init__(self, port, baud, session_id, start_order, out_dir):
+    def __init__(self, port, baud, session_id, start_order, out_dir, metadata_dir):
         self.session_id  = session_id
         self.start_order = start_order
-        self.out_dir     = out_dir
-        self.order       = start_order
-        self.chunks_ok   = 0
-        self.stop        = False
+        self.out_dir       = out_dir
+        self.metadata_dir  = metadata_dir
+        self.order         = start_order
+        self.chunks_ok     = 0
+        self.stop          = False
 
         ensure_dir(out_dir)
+        ensure_dir(metadata_dir)
+
+        self.metadata_path = os.path.join(metadata_dir, metadata_filename(session_id))
+        self.metadata = load_metadata(self.metadata_path, session_id)
+        self.next_sound_id = next_metadata_id(self.metadata)
 
         print(f"\n{'='*55}")
         print(f"  Sesion {session_id}  |  Orden inicial: {start_order}")
         print(f"  Chunk : {CHUNK_SECS}s = {SAMPLES_CHUNK} muestras/canal")
-        print(f"  Salida: {out_dir}")
-        print(f"  Ctrl+C para detener (chunk en curso se descarta)")
+        print(f"  Modo  : BINARIO + CRC32 ({CHANNEL_BYTES} bytes/canal)")
+        print(f"  Audio : {os.path.abspath(out_dir)}")
+        print(f"  Metadata: {os.path.abspath(self.metadata_path)}")
+        print(f"  Ctrl+C para detener")
         print(f"{'='*55}\n")
 
         if port:
             try:
-                self.ser = serial.Serial(port, baud, timeout=2.0)
+                self.ser = serial.Serial(port, baud, timeout=5.0)
                 print(f"[UART] Conectado a {port} @ {baud} baud")
             except Exception as e:
                 print(f"[ERROR] {e}")
                 sys.exit(1)
             self.simulation = False
 
-            # Esperar a que el STM32 este listo
             print("[UART] Esperando que el STM32 este listo...")
             t0   = time.time()
             sent = False
             while time.time() - t0 < 60 and not sent:
                 try:
-                    raw = self.ser.readline()
-                    if not raw:
-                        continue
+                    raw  = self.ser.readline()
                     line = raw.decode("ascii", errors="ignore").strip()
                     if line:
                         print(f"  [STM32] {line}")
-                    if ("esperando comando RECORD" in line or
-                            "RECORD_READY" in line or
+                    if ("UART_RX" in line or
                             "esperando byte" in line or
-                            "UART_RX" in line):
+                            "RECORD_READY" in line or
+                            "esperando comando RECORD" in line):
                         time.sleep(0.3)
                         self.ser.write(b"R")
                         self.ser.flush()
@@ -148,7 +298,7 @@ class GrabacionSession:
                 self.ser.write(b"R")
                 self.ser.flush()
         else:
-            self.ser = None
+            self.ser        = None
             self.simulation = True
             print("[SIM] Modo simulacion activo (sin --port)")
 
@@ -163,100 +313,117 @@ class GrabacionSession:
             except Exception:
                 pass
 
-    def _reset_chunk(self):
-        return {ch: [] for ch in range(4)}
+    def _read_exact(self, n: int) -> bytes | None:
+        """Lee exactamente n bytes del puerto serie."""
+        buf = b""
+        while len(buf) < n and not self.stop:
+            try:
+                chunk = self.ser.read(n - len(buf))
+                if chunk:
+                    buf += chunk
+            except serial.SerialException as e:
+                print(f"\n[ERROR] UART read: {e}")
+                return None
+        return buf if len(buf) == n else None
 
-    def _receive_chunk(self):
-        channels   = self._reset_chunk()
-        current_ch = None
+    def _receive_channel_binary(self, ch_idx: int) -> list | None:
+        """
+        Lee el payload binario de un canal:
+          88200 bytes int16 LE + 4 bytes CRC32 LE
+        Devuelve lista de 44100 ints o None si hay error.
+        """
+        data = self._read_exact(CHANNEL_BYTES)
+        if data is None:
+            return None
+
+        payload  = data[:PAYLOAD_BYTES]
+        crc_recv = struct.unpack_from("<I", data, PAYLOAD_BYTES)[0]
+
+        # Verificar CRC32
+        crc_calc = zlib.crc32(payload) & 0xFFFFFFFF
+        if crc_calc != crc_recv:
+            print(f"\n[ERROR] CRC32 CH{ch_idx} — "
+                  f"calculado=0x{crc_calc:08X} recibido=0x{crc_recv:08X}")
+            return None
+
+        # Desempaquetar int16 LE
+        samples = list(struct.unpack_from(f"<{SAMPLES_CHUNK}h", payload))
+        return samples
+
+    def _receive_chunk(self) -> dict | None:
+        """
+        Recibe un chunk completo:
+          Lee líneas ASCII hasta [CHUNK_START]
+          Para cada canal: espera [CHx_BIN] y lee payload binario
+          Termina con [CHUNK_END]
+        """
+        channels   = {}
+        in_chunk   = False
         total      = SAMPLES_CHUNK
 
         while not self.stop:
+            # Leer línea ASCII
             try:
-                raw = self.ser.readline()
+                raw  = self.ser.readline()
+                line = raw.decode("ascii", errors="ignore").strip()
             except serial.SerialException as e:
                 print(f"\n[ERROR] UART: {e}")
                 return None
-
-            if not raw:
-                continue
-
-            try:
-                line = raw.decode("ascii", errors="ignore").strip()
-            except Exception:
-                continue
 
             if not line:
                 continue
 
             # Inicio de chunk
             if line.startswith("[CHUNK_START]"):
-                parts      = line.split()
-                total      = int(parts[1]) if len(parts) > 1 else SAMPLES_CHUNK
-                channels   = self._reset_chunk()
-                current_ch = None
+                parts    = line.split()
+                total    = int(parts[1]) if len(parts) > 1 else SAMPLES_CHUNK
+                channels = {}
+                in_chunk = True
                 print(f"  → Chunk {self.order} recibiendo "
-                      f"({total} muestras/canal)...", end="", flush=True)
+                      f"({total} muestras/canal, binario)...",
+                      end="", flush=True)
                 continue
 
-            # Fin de chunk — retornar channels directamente
-            if line.startswith("[CHUNK_END]"):
-                sizes = [len(channels[ch]) for ch in range(4)]
-                # Ignorar CHUNK_END vacío (llega del chunk anterior ya procesado)
-                if all(s == 0 for s in sizes):
-                    in_chunk = False
-                    continue
-                print(f"\n  ← CHUNK_END; tamaños={sizes}")
-                in_chunk = False
-                return channels
-
-            # CHUNK_GUARDADO — cerrar solo si tenemos suficientes muestras
-            if line.startswith("[CHUNK_GUARDADO]"):
-                sizes  = [len(channels[ch]) for ch in range(4)]
-                filled = sum(1 for s in sizes if s >= total - 200)
-                if filled >= 4 and in_chunk:
-                    print(f"\n  ← CHUNK_GUARDADO como cierre; tamaños={sizes}")
-                    in_chunk = False
-                    return channels
-                else:
-                    print(f"\n  [STM32] {line} (esperando mas muestras {sizes})")
-                    continue
-
-            # Inicio de canal
-            if line.startswith("[CH") and "_START]" in line:
-                try:
-                    current_ch = CH_TAGS.index(line[1:4])
-                except ValueError:
-                    pass
+            if not in_chunk:
+                self._print_stm32(line)
                 continue
 
-            # Fin de canal
-            if line.startswith("[CH") and "_END]" in line:
-                current_ch = None
-                continue
+            # Header de canal binario: [CHx_BIN]
+            for ch_idx, tag in enumerate(CH_BIN_TAGS):
+                if line.startswith(tag.replace("\r\n", "").strip()):
+                    t0      = time.time()
+                    samples = self._receive_channel_binary(ch_idx)
+                    elapsed = time.time() - t0
+                    if samples is None:
+                        print(f"\n[ERROR] Fallo recibiendo CH{ch_idx}")
+                        return None
+                    channels[ch_idx] = samples
+                    print(f" CH{ch_idx}✓({elapsed:.2f}s)",
+                          end="", flush=True)
+                    break
 
-            # Muestra hex
-            if current_ch is not None and 6 <= len(line) <= 8:
-                try:
-                    sample = sai24_to_int(int(line, 16))
-                    if len(channels[current_ch]) < total:
-                        channels[current_ch].append(sample)
-                except ValueError:
-                    pass
+            # Confirmacion ASCII de fin de canal
+            for ch_idx, tag in enumerate(CH_END_TAGS):
+                if line.startswith(tag.replace("\r\n", "").strip()):
+                    # Extraer sent/errors del mensaje
+                    if "errors=0" not in line:
+                        print(f"\n[WARN] {line}")
+                    break
 
-                # Imprimir progreso cada 10000 muestras del CH0
-                if current_ch == 0:
-                    n = len(channels[0])
-                    if n % 10000 == 0 and n > 0:
-                        sizes = [len(channels[ch]) for ch in range(4)]
-                        print(f"\n    [PROG] {sizes}", end="", flush=True)
-
-                # Retornar cuando TODOS los canales tienen suficientes muestras
-                if all(len(channels[ch]) >= total for ch in range(4)):
+            # Fin de chunk
+            if line.startswith("[CHUNK_END]") or line.startswith("[CHUNK_GUARDADO]"):
+                if len(channels) == 4:
                     sizes = [len(channels[ch]) for ch in range(4)]
-                    print(f" completo [{', '.join(str(s) for s in sizes)}]")
+                    print(f" completo {sizes}")
                     return channels
-                continue
+                # CHUNK_END vacío del chunk anterior — ignorar
+                if len(channels) == 0:
+                    in_chunk = False
+                    continue
+
+            # Mensajes de progreso
+            if in_chunk and not any(line.startswith(t.strip()) for t in CH_BIN_TAGS):
+                self._print_stm32(line)
 
             # Fin de grabacion
             if "RECORD_DONE" in line:
@@ -264,35 +431,33 @@ class GrabacionSession:
                 self.stop = True
                 return None
 
-            # Mensajes de progreso
-            if current_ch is None:
-                if "[GRABANDO]" in line:
-                    print(f"\n  \U0001f399\ufe0f  {line}")
-                elif "[CHUNK_GUARDADO]" in line:
-                    print(f"\n  \u2705 {line}")
-                elif "RECORD_READY" in line:
-                    print(f"\n  \u25b6\ufe0f  Grabacion iniciada — acerca el audio al microfono")
-                elif line:
-                    print(f"  [STM32] {line}")
-
         return None
 
-    def _simulate_chunk(self):
+    def _print_stm32(self, line: str):
+        if "[GRABANDO]" in line:
+            print(f"\n  \U0001f399\ufe0f  {line}")
+        elif "[CHUNK_GUARDADO]" in line or "[CHUNK_LISTO]" in line:
+            print(f"\n  \u2139\ufe0f  {line}")
+        elif "RECORD_READY" in line:
+            print(f"\n  \u25b6\ufe0f  Grabacion iniciada")
+        elif line:
+            print(f"  [STM32] {line}")
+
+    def _simulate_chunk(self) -> dict:
         import random
         return {
-            0: [random.randint(-80000, 80000) for _ in range(SAMPLES_CHUNK)],
-            1: [random.randint(-80000, 80000) for _ in range(SAMPLES_CHUNK)],
-            2: [random.randint(-500,   500)   for _ in range(SAMPLES_CHUNK)],
-            3: [random.randint(-500,   500)   for _ in range(SAMPLES_CHUNK)],
+            0: [random.randint(-8000,  8000) for _ in range(SAMPLES_CHUNK)],
+            1: [random.randint(-8000,  8000) for _ in range(SAMPLES_CHUNK)],
+            2: [random.randint(-500,    500) for _ in range(SAMPLES_CHUNK)],
+            3: [random.randint(-500,    500) for _ in range(SAMPLES_CHUNK)],
         }
 
     def run(self):
         try:
             while not self.stop:
                 if self.simulation:
-                    time.sleep(CHUNK_SECS)
-                    if self.stop:
-                        break
+                    time.sleep(0.5)
+                    if self.stop: break
                     channels = self._simulate_chunk()
                 else:
                     channels = self._receive_chunk()
@@ -300,22 +465,35 @@ class GrabacionSession:
                         break
 
                 sizes = [len(channels[ch]) for ch in range(4)]
-                if any(s < SAMPLES_CHUNK - 100 for s in sizes):
-                    print(f"\n[WARN] Chunk {self.order} muy corto {sizes} — descartado")
+                if any(s != SAMPLES_CHUNK for s in sizes):
+                    print(f"\n[WARN] Chunk {self.order} incompleto {sizes} — descartado")
                     continue
 
                 ok = save_chunk(channels, self.session_id, self.order, self.out_dir)
                 if ok:
+                    try:
+                        self.next_sound_id = upsert_metadata_chunk(
+                            self.metadata,
+                            self.session_id,
+                            self.order,
+                            self.next_sound_id,
+                        )
+                        save_metadata_atomic(self.metadata, self.metadata_path)
+                    except Exception as exc:
+                        print(f"\n[ERROR] No se pudo actualizar metadata: {exc}")
+                        break
+
                     self.chunks_ok += 1
                     print(f"\n{'='*55}")
-                    print(f"  \u2705 CHUNK {self.chunks_ok} GUARDADO")
-                    print(f"     session_{self.session_id}_ord{self.order:04d}_mic2.json")
-                    print(f"     session_{self.session_id}_ord{self.order:04d}_mic4.json")
-                    print(f"     session_{self.session_id}_ord{self.order:04d}_mic3.json")
-                    print(f"     session_{self.session_id}_ord{self.order:04d}_mic1.json")
-                    print(f"     Total chunks: {self.chunks_ok}")
+                    print(f"  \u2705 CHUNK {self.chunks_ok} GUARDADO (ord {self.order})")
+                    for mic in sorted(MICS.values(), key=lambda item: item["mic_id"]):
+                        print(
+                            f"     mic{mic['mic_id']} ({mic['mic_name']}): "
+                            f"{filename(self.session_id, self.order, mic['mic_name'])}"
+                        )
+                    print(f"     metadata: {metadata_filename(self.session_id)}")
                     print(f"{'='*55}")
-                    print(f"  Grabando siguiente chunk... (Ctrl+C para terminar)")
+                    print(f"  \u23f3 Grabando siguiente chunk... (Ctrl+C para terminar)")
                     self.order += 1
 
         finally:
@@ -334,7 +512,8 @@ class GrabacionSession:
         print(f"  Chunks completos : {self.chunks_ok}")
         print(f"  Archivos JSON    : {total_files}")
         print(f"  Ordenes          : {self.start_order} → {self.order - 1}")
-        print(f"  Carpeta          : {os.path.abspath(self.out_dir)}")
+        print(f"  Carpeta audio    : {os.path.abspath(self.out_dir)}")
+        print(f"  Metadata         : {os.path.abspath(self.metadata_path)}")
         print(f"{'='*55}\n")
 
 
@@ -342,14 +521,16 @@ class GrabacionSession:
 
 def main():
     parser = argparse.ArgumentParser(
-        description=f"Graba audio del STM32 en chunks exactos de {CHUNK_SECS}s."
+        description=f"Graba audio STM32 en chunks de {CHUNK_SECS}s — modo binario."
     )
-    parser.add_argument("--port",        default=None,
-                        help="Puerto COM (ej. COM6). Omitir para simular.")
+    parser.add_argument("--port",        default=None)
     parser.add_argument("--baud",        type=int, default=921600)
     parser.add_argument("--session",     type=int, default=1)
     parser.add_argument("--start-order", type=int, default=1)
-    parser.add_argument("--output",      default=OUTPUT_DIR)
+    parser.add_argument("--output",      default=OUTPUT_DIR,
+                        help="Carpeta para los JSON de audio")
+    parser.add_argument("--metadata-output", default=METADATA_DIR,
+                        help="Carpeta para audio_metadata_s<ID>.json")
     args = parser.parse_args()
 
     session = GrabacionSession(
@@ -357,7 +538,8 @@ def main():
         baud        = args.baud,
         session_id  = args.session,
         start_order = args.start_order,
-        out_dir     = args.output,
+        out_dir       = args.output,
+        metadata_dir  = args.metadata_output,
     )
     session.run()
 
