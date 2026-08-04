@@ -44,17 +44,21 @@ _Static_assert(
 );
 #endif
 
-/* PCM24 alineado a la derecha en bits [23:0]. */
-static inline float sai24_word_to_float(uint32_t word)
+static inline float sai24_right_to_float(uint32_t word)
 {
-    int32_t sample =
-        (int32_t)(word & 0x00FFFFFFU);
+    int32_t sample = (int32_t)(word & 0x00FFFFFFU);
 
     if ((sample & 0x00800000L) != 0)
     {
         sample |= (int32_t)0xFF000000U;
     }
 
+    return (float)sample / 8388608.0f;
+}
+
+static inline float sai24_left_to_float(uint32_t word)
+{
+    const int32_t sample = ((int32_t)word) >> 8;
     return (float)sample / 8388608.0f;
 }
 
@@ -82,6 +86,7 @@ int audio_capture_init(AudioCaptureContext *ctx)
     ctx->dma_full_complete = 0U;
 
     ctx->buffer_state = AUDIO_BUFFER_EMPTY;
+    ctx->discard_pairs = 0U;
     ctx->frame_count = 0U;
     ctx->error_count = 0U;
 
@@ -138,6 +143,32 @@ int audio_capture_stop(AudioCaptureContext *ctx)
     return 0;
 }
 
+void audio_capture_discard_pending(AudioCaptureContext *ctx)
+{
+    if (ctx == NULL)
+    {
+        return;
+    }
+
+    const uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+
+    ctx->dma_a_half = 0U;
+    ctx->dma_a_full = 0U;
+    ctx->dma_b_half = 0U;
+    ctx->dma_b_full = 0U;
+    ctx->dma_half_complete = 0U;
+    ctx->dma_full_complete = 0U;
+    ctx->buffer_state = AUDIO_BUFFER_EMPTY;
+    ctx->discard_pairs = 2U;
+
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+}
+
 void audio_capture_deinterleave(
     AudioCaptureContext *ctx,
     uint8_t half
@@ -160,7 +191,7 @@ void audio_capture_deinterleave(
             ? 0U
             : (AUDIO_DMA_BUFFER_SIZE / 2U);
 
-    /* ---------------- DIAGNOSTICO RAW ---------------- */
+    /* ---------------- DIAGNOSTICO DE ALINEACION ---------------- */
 
     static uint32_t debug_counter = 0U;
 
@@ -170,70 +201,86 @@ void audio_capture_deinterleave(
     {
         debug_counter = 0U;
 
-        float energy_b_even = 0.0f;
-        float energy_b_odd  = 0.0f;
-        float energy_a_even = 0.0f;
-        float energy_a_odd  = 0.0f;
+        float energy_left[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        float energy_right[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        uint32_t lsb_zero[4] = {0U, 0U, 0U, 0U};
+        uint32_t msb_zero_or_ff[4] = {0U, 0U, 0U, 0U};
 
         for (uint32_t i = 0U; i < 64U; i++)
         {
-            const uint32_t index =
-                offset + i * AUDIO_SLOTS_PER_FRAME;
+            const uint32_t index = offset + i * AUDIO_SLOTS_PER_FRAME;
+            const uint32_t words[4] =
+            {
+                dma_buf_b[index],
+                dma_buf_b[index + 1U],
+                dma_buf_a[index],
+                dma_buf_a[index + 1U]
+            };
 
-            const float b_even =
-                sai24_word_to_float(dma_buf_b[index]);
+            for (uint32_t slot = 0U; slot < 4U; slot++)
+            {
+                const float left = sai24_left_to_float(words[slot]);
+                const float right = sai24_right_to_float(words[slot]);
+                const uint8_t lsb = (uint8_t)(words[slot] & 0xFFU);
+                const uint8_t msb = (uint8_t)((words[slot] >> 24U) & 0xFFU);
 
-            const float b_odd =
-                sai24_word_to_float(dma_buf_b[index + 1U]);
+                energy_left[slot] += left * left;
+                energy_right[slot] += right * right;
 
-            const float a_even =
-                sai24_word_to_float(dma_buf_a[index]);
+                if (lsb == 0U)
+                {
+                    lsb_zero[slot]++;
+                }
 
-            const float a_odd =
-                sai24_word_to_float(dma_buf_a[index + 1U]);
-
-            energy_b_even += b_even * b_even;
-            energy_b_odd  += b_odd  * b_odd;
-            energy_a_even += a_even * a_even;
-            energy_a_odd  += a_odd  * a_odd;
+                if ((msb == 0x00U) || (msb == 0xFFU))
+                {
+                    msb_zero_or_ff[slot]++;
+                }
+            }
         }
 
-        const float db_b_even =
-            (energy_b_even > 1.0e-12f)
-                ? 20.0f * log10f(
-                    sqrtf(energy_b_even / 64.0f)
-                )
-                : -120.0f;
+        float db_left[4];
+        float db_right[4];
 
-        const float db_b_odd =
-            (energy_b_odd > 1.0e-12f)
-                ? 20.0f * log10f(
-                    sqrtf(energy_b_odd / 64.0f)
-                )
-                : -120.0f;
+        for (uint32_t slot = 0U; slot < 4U; slot++)
+        {
+            db_left[slot] =
+                (energy_left[slot] > 1.0e-12f)
+                    ? 20.0f * log10f(sqrtf(energy_left[slot] / 64.0f))
+                    : -120.0f;
 
-        const float db_a_even =
-            (energy_a_even > 1.0e-12f)
-                ? 20.0f * log10f(
-                    sqrtf(energy_a_even / 64.0f)
-                )
-                : -120.0f;
-
-        const float db_a_odd =
-            (energy_a_odd > 1.0e-12f)
-                ? 20.0f * log10f(
-                    sqrtf(energy_a_odd / 64.0f)
-                )
-                : -120.0f;
+            db_right[slot] =
+                (energy_right[slot] > 1.0e-12f)
+                    ? 20.0f * log10f(sqrtf(energy_right[slot] / 64.0f))
+                    : -120.0f;
+        }
 
         printf(
-            "[RAW24] "
-            "B_par:%5.1f B_imp:%5.1f "
-            "A_par:%5.1f A_imp:%5.1f dBFS\r\n",
-            (double)db_b_even,
-            (double)db_b_odd,
-            (double)db_a_even,
-            (double)db_a_odd
+            "[ALIGN-L] B_par:%5.1f B_imp:%5.1f A_par:%5.1f A_imp:%5.1f dBFS\r\n",
+            (double)db_left[0],
+            (double)db_left[1],
+            (double)db_left[2],
+            (double)db_left[3]
+        );
+
+        printf(
+            "[ALIGN-R] B_par:%5.1f B_imp:%5.1f A_par:%5.1f A_imp:%5.1f dBFS\r\n",
+            (double)db_right[0],
+            (double)db_right[1],
+            (double)db_right[2],
+            (double)db_right[3]
+        );
+
+        printf(
+            "[BYTEPOS] LSB00=[%lu %lu %lu %lu]/64 MSB00FF=[%lu %lu %lu %lu]/64\r\n",
+            (unsigned long)lsb_zero[0],
+            (unsigned long)lsb_zero[1],
+            (unsigned long)lsb_zero[2],
+            (unsigned long)lsb_zero[3],
+            (unsigned long)msb_zero_or_ff[0],
+            (unsigned long)msb_zero_or_ff[1],
+            (unsigned long)msb_zero_or_ff[2],
+            (unsigned long)msb_zero_or_ff[3]
         );
     }
 
@@ -302,6 +349,13 @@ AudioBufferState audio_capture_get_data(
     if (primask == 0U)
     {
         __enable_irq();
+    }
+
+    if ((half_ready || full_ready) &&
+        (ctx->discard_pairs > 0U))
+    {
+        ctx->discard_pairs--;
+        return AUDIO_BUFFER_EMPTY;
     }
 
     if (half_ready)

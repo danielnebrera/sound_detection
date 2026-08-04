@@ -38,8 +38,8 @@ ENTRY(Reset_Handler)
 /* Highest address of the user mode stack */
 _estack = ORIGIN(RAM_D1) + LENGTH(RAM_D1); /* end of "RAM_D1" Ram type memory */
 
-_Min_Heap_Size = 0x200; /* required amount of heap  */
-_Min_Stack_Size = 0x400; /* required amount of stack */
+_Min_Heap_Size = 0x1000; /* 4 KiB heap */
+_Min_Stack_Size = 0x6000; /* 24 KiB stack */
 
 /* Memories definition */
 MEMORY
@@ -150,6 +150,39 @@ SECTIONS
     _edata = .;        /* define a global symbol at data end */
   } >RAM_D1 AT> FLASH
 
+  /* One raw PCM16 channel retained in AXI SRAM. */
+  .RAM_D1_audio (NOLOAD) :
+  {
+    . = ALIGN(32);
+    __ram_d1_audio_start__ = .;
+    *(.RAM_D1_audio)
+    *(.RAM_D1_audio*)
+    . = ALIGN(32);
+    __ram_d1_audio_end__ = .;
+  } >RAM_D1
+
+  /* Shared float work buffer used sequentially by all microphones. */
+  .RAM_D1_work (NOLOAD) :
+  {
+    . = ALIGN(32);
+    __ram_d1_work_start__ = .;
+    *(.RAM_D1_work)
+    *(.RAM_D1_work*)
+    . = ALIGN(32);
+    __ram_d1_work_end__ = .;
+  } >RAM_D1
+
+  /* TFLite Micro tensor arena. */
+  .RAM_D1_model (NOLOAD) :
+  {
+    . = ALIGN(32);
+    __ram_d1_model_start__ = .;
+    *(.RAM_D1_model)
+    *(.RAM_D1_model*)
+    . = ALIGN(32);
+    __ram_d1_model_end__ = .;
+  } >RAM_D1
+
   /* Uninitialized data section into "RAM" Ram type memory */
   . = ALIGN(4);
   .bss :
@@ -177,14 +210,66 @@ SECTIONS
     . = ALIGN(8);
   } >RAM_D1
 
-	/* Buffers DMA en RAM_D2 - accesible por DMA1 */
-	.RAM_D2_bss (NOLOAD) :
-	{
-	  . = ALIGN(4);
-	  *(.RAM_D2_bss)
-	  *(.RAM_D2_bss*)
-	  . = ALIGN(4);
-	} >RAM_D2
+  /* DMA buffers in the non-cacheable D2 window. */
+  .RAM_D2_bss (NOLOAD) :
+  {
+    . = ALIGN(32);
+    __ram_d2_bss_start__ = .;
+    *(.RAM_D2_bss)
+    *(.RAM_D2_bss*)
+    . = ALIGN(32);
+    __ram_d2_bss_end__ = .;
+  } >RAM_D2
+
+  /* Two raw PCM16 channels. */
+  .RAM_D2_audio (NOLOAD) :
+  {
+    . = ALIGN(32);
+    __ram_d2_audio_start__ = .;
+    *(.RAM_D2_audio)
+    *(.RAM_D2_audio*)
+    . = ALIGN(32);
+    __ram_d2_audio_end__ = .;
+  } >RAM_D2
+
+  /* MFCC FFT input/output buffers. */
+  .RAM_D2_dsp (NOLOAD) :
+  {
+    . = ALIGN(32);
+    __ram_d2_dsp_start__ = .;
+    *(.RAM_D2_dsp)
+    *(.RAM_D2_dsp*)
+    . = ALIGN(32);
+    __ram_d2_dsp_end__ = .;
+  } >RAM_D2
+
+  /* Fourth raw PCM16 channel; CPU access only, never a DMA target. */
+  .DTCM_audio (NOLOAD) :
+  {
+    . = ALIGN(32);
+    __dtcm_audio_start__ = .;
+    *(.DTCM_audio)
+    *(.DTCM_audio*)
+    . = ALIGN(32);
+    __dtcm_audio_end__ = .;
+  } >DTCMRAM
+
+  /* MFCC tensor, window and scratch arrays. */
+  .DTCM_dsp (NOLOAD) :
+  {
+    . = ALIGN(32);
+    __dtcm_dsp_start__ = .;
+    *(.DTCM_dsp)
+    *(.DTCM_dsp*)
+    . = ALIGN(32);
+    __dtcm_dsp_end__ = .;
+  } >DTCMRAM
+
+  /* MPU region 4 currently maps only the first 256 KiB of RAM_D2. */
+  ASSERT(
+    (__ram_d2_dsp_end__ <= (ORIGIN(RAM_D2) + 0x40000)),
+    "RAM_D2 audio/DSP exceeds the 256 KiB MPU window"
+  )
 
   /* Remove information from the compiler libraries */
   /DISCARD/ :

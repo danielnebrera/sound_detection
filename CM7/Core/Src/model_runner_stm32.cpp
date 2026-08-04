@@ -22,7 +22,7 @@
 /* X-CUBE-AI reportó RAM: 143872 bytes. Ponemos 160 KB con margen. */
 #define TENSOR_ARENA_SIZE  (160 * 1024)
 
-__attribute__((aligned(16)))
+__attribute__((section(".RAM_D1_model"), aligned(32)))
 static uint8_t s_tensor_arena[TENSOR_ARENA_SIZE];
 
 /* ── Handle del modelo (uint32_t según tflm_c.h) ─────────────── */
@@ -33,6 +33,8 @@ static bool     s_inited = false;
 extern "C" bool model_runner_init(void)
 {
     if (s_inited) return true;
+
+    memset(s_tensor_arena, 0, sizeof(s_tensor_arena));
 
     TfLiteStatus st = tflm_c_create(
         g_tflm_network_model_data,

@@ -5,7 +5,7 @@
  *
  * Mantiene el pipeline que funcionaba en el ESP32:
  *
- *   PCM24
+ *   PCM16 raw compartido
  *   -> HPF continuo
  *   -> tanh(hpf * 15)
  *   -> eliminar media del segundo
@@ -15,8 +15,8 @@
  *   -> modelo
  *
  * Memoria:
- *   - Mic2: float[44100]                 (buffer de trabajo)
- *   - Mic4, Mic3, Mic1: int16_t[44100]  (Q15)
+ *   - Ventana PCM16 compartida con audio_recorder
+ *   - Un unico float[44100] de trabajo
  *   - Un unico tensor MFCC
  *   - Una unica instancia/arena TFLite
  *
@@ -36,7 +36,6 @@
 #include "drone_detection.h"
 #include "mfcc_stm32.h"
 #include "model_runner_stm32.h"
-#include "audio_capture.h"
 
 #include <math.h>
 #include <stdbool.h>
@@ -54,7 +53,6 @@
 #define HPF_ALPHA              0.90f
 #define DSP_GAIN               15.0f
 #define PREEMPHASIS            0.97f
-#define Q15_SCALE              32767.0f
 
 /*
  * Gate relativo por microfono.
@@ -121,41 +119,16 @@ static const float s_activity_margin_db[DET_CHANNELS] =
 };
 
 /* -----------------------------------------------------------------
- * Buffers
+ * Shared-window DSP buffers
  * ----------------------------------------------------------------- */
 
-/*
- * Mic2 se almacena directamente en float.
- * Luego este mismo buffer se reutiliza para Mic4, Mic3 y Mic1.
- */
+/* One float work buffer reused sequentially for all four microphones. */
+__attribute__((section(".RAM_D1_work"), aligned(32)))
 static float s_work_buffer[SAMPLES_PER_SECOND];
 
-/* Mic1 en RAM D1 / AXI */
-static int16_t s_pcm_mic1[SAMPLES_PER_SECOND];
-
-/* Mic4 y Mic3 en RAM D2 */
-__attribute__((section(".RAM_D2_bss")))
-static int16_t s_pcm_mic4[SAMPLES_PER_SECOND];
-
-__attribute__((section(".RAM_D2_bss")))
-static int16_t s_pcm_mic3[SAMPLES_PER_SECOND];
-
-/* Un unico tensor MFCC para los cuatro canales */
+/* One MFCC tensor reused sequentially for all four microphones. */
+__attribute__((section(".DTCM_dsp"), aligned(32)))
 static mfcc_100x20_t s_mfcc;
-
-/* -----------------------------------------------------------------
- * Estado de captura
- * ----------------------------------------------------------------- */
-
-static uint32_t s_write_index[DET_CHANNELS] =
-{
-    0U, 0U, 0U, 0U
-};
-
-static bool s_ready[DET_CHANNELS] =
-{
-    false, false, false, false
-};
 
 /* HPF continuo por microfono */
 static float s_hpf_previous_input[DET_CHANNELS] =
@@ -214,116 +187,36 @@ static uint8_t s_far_streak = 0U;
 static uint8_t s_alert_hold = 0U;
 
 /* -----------------------------------------------------------------
- * Conversion PCM24
- *
- * DATASIZE_24: muestra valida en bits [23:0], alineada a derecha.
+ * Load one recorded PCM16 channel into the shared float work buffer.
+ * The HPF state remains independent and continuous for each microphone.
  * ----------------------------------------------------------------- */
 
-static inline float sai24_to_float(int32_t word)
-{
-    int32_t sample =
-        (int32_t)((uint32_t)word & 0x00FFFFFFU);
-
-    if ((sample & 0x00800000L) != 0)
-    {
-        sample |= (int32_t)0xFF000000U;
-    }
-
-    return (float)sample / 8388608.0f;
-}
-
-/* -----------------------------------------------------------------
- * Q15
- * ----------------------------------------------------------------- */
-
-static inline int16_t float_to_q15(float value)
-{
-    if (value >= 1.0f)
-    {
-        return (int16_t)32767;
-    }
-
-    if (value <= -1.0f)
-    {
-        return (int16_t)-32767;
-    }
-
-    return (int16_t)(value * Q15_SCALE);
-}
-
-static inline float q15_to_float(int16_t value)
-{
-    return (float)value / Q15_SCALE;
-}
-
-/* -----------------------------------------------------------------
- * Almacenamiento de muestras condicionadas
- * ----------------------------------------------------------------- */
-
-static inline void store_conditioned_sample(
+static void load_pcm16_channel_into_work_buffer(
     uint32_t channel,
-    uint32_t position,
-    float value)
+    const int16_t *source)
 {
-    switch (channel)
+    if ((channel >= DET_CHANNELS) || (source == NULL))
     {
-        case CHANNEL_MIC2:
-            s_work_buffer[position] = value;
-            break;
-
-        case CHANNEL_MIC4:
-            s_pcm_mic4[position] = float_to_q15(value);
-            break;
-
-        case CHANNEL_MIC3:
-            s_pcm_mic3[position] = float_to_q15(value);
-            break;
-
-        case CHANNEL_MIC1:
-            s_pcm_mic1[position] = float_to_q15(value);
-            break;
-
-        default:
-            break;
-    }
-}
-
-/* -----------------------------------------------------------------
- * Cargar un canal Q15 en el unico buffer float
- * ----------------------------------------------------------------- */
-
-static void load_channel_into_work_buffer(uint32_t channel)
-{
-    const int16_t *source = NULL;
-
-    switch (channel)
-    {
-        case CHANNEL_MIC2:
-            /*
-             * Mic2 ya esta en s_work_buffer.
-             * Debe procesarse antes que los otros canales.
-             */
-            return;
-
-        case CHANNEL_MIC4:
-            source = s_pcm_mic4;
-            break;
-
-        case CHANNEL_MIC3:
-            source = s_pcm_mic3;
-            break;
-
-        case CHANNEL_MIC1:
-            source = s_pcm_mic1;
-            break;
-
-        default:
-            return;
+        return;
     }
 
     for (uint32_t i = 0U; i < SAMPLES_PER_SECOND; i++)
     {
-        s_work_buffer[i] = q15_to_float(source[i]);
+        const float normalized =
+            (float)source[i] / 32768.0f;
+
+        const float hpf =
+            HPF_ALPHA *
+            (
+                s_hpf_previous_output[channel] +
+                normalized -
+                s_hpf_previous_input[channel]
+            );
+
+        s_hpf_previous_input[channel] = normalized;
+        s_hpf_previous_output[channel] = hpf;
+
+        s_work_buffer[i] = tanhf(hpf * DSP_GAIN);
     }
 }
 
@@ -405,12 +298,7 @@ bool drone_detection_init(void)
     );
 
     memset(s_work_buffer, 0, sizeof(s_work_buffer));
-    memset(s_pcm_mic1, 0, sizeof(s_pcm_mic1));
-    memset(s_pcm_mic4, 0, sizeof(s_pcm_mic4));
-    memset(s_pcm_mic3, 0, sizeof(s_pcm_mic3));
-
-    memset(s_write_index, 0, sizeof(s_write_index));
-    memset(s_ready, 0, sizeof(s_ready));
+    memset(&s_mfcc, 0, sizeof(s_mfcc));
 
     memset(
         s_hpf_previous_input,
@@ -458,7 +346,7 @@ bool drone_detection_init(void)
     }
 
     printf(
-        "[DET] Sistema listo: 1 float + 3 Q15, FAR=%u, "
+        "[DET] Sistema listo: ventana PCM16 compartida + 1 float, FAR=%u, "
         "margenes=[M1 %.1f M2 %.1f M3 %.1f M4 %.1f] dB\r\n",
         (unsigned)TICKS_FOR_PERSISTENCE,
         (double)s_activity_margin_db[CHANNEL_MIC1],
@@ -471,97 +359,7 @@ bool drone_detection_init(void)
 }
 
 /* -----------------------------------------------------------------
- * Acumulacion simultanea
- * ----------------------------------------------------------------- */
-
-void drone_detection_accumulate(void)
-{
-    extern AudioCaptureContext g_audio_ctx;
-
-    for (uint32_t channel = 0U;
-         channel < DET_CHANNELS;
-         channel++)
-    {
-        if (s_ready[channel])
-        {
-            continue;
-        }
-
-        int32_t *input =
-            audio_capture_get_channel(
-                &g_audio_ctx,
-                (uint8_t)channel
-            );
-
-        if (input == NULL)
-        {
-            continue;
-        }
-
-        const uint32_t remaining =
-            SAMPLES_PER_SECOND - s_write_index[channel];
-
-        const uint32_t samples_to_copy =
-            (AUDIO_BUFFER_SIZE < remaining)
-                ? AUDIO_BUFFER_SIZE
-                : remaining;
-
-        for (uint32_t i = 0U;
-             i < samples_to_copy;
-             i++)
-        {
-            const float normalized =
-                sai24_to_float(input[i]);
-
-            const float hpf =
-                HPF_ALPHA *
-                (
-                    s_hpf_previous_output[channel] +
-                    normalized -
-                    s_hpf_previous_input[channel]
-                );
-
-            s_hpf_previous_input[channel] =
-                normalized;
-
-            s_hpf_previous_output[channel] =
-                hpf;
-
-            const float conditioned =
-                tanhf(hpf * DSP_GAIN);
-
-            store_conditioned_sample(
-                channel,
-                s_write_index[channel] + i,
-                conditioned
-            );
-        }
-
-        s_write_index[channel] += samples_to_copy;
-
-        if (s_write_index[channel] >= SAMPLES_PER_SECOND)
-        {
-            s_write_index[channel] = 0U;
-            s_ready[channel] = true;
-        }
-    }
-}
-
-/* -----------------------------------------------------------------
- * Estado de captura
- * ----------------------------------------------------------------- */
-
-bool drone_detection_is_ready(void)
-{
-    return
-        s_ready[CHANNEL_MIC2] &&
-        s_ready[CHANNEL_MIC4] &&
-        s_ready[CHANNEL_MIC3] &&
-        s_ready[CHANNEL_MIC1];
-}
-
-/* -----------------------------------------------------------------
- * Procesamiento individual
+ * Individual channel processing
  * ----------------------------------------------------------------- */
 
 static float median_of_three(float a, float b, float c)
@@ -590,9 +388,11 @@ static float median_of_three(float a, float b, float c)
     return b;
 }
 
-static void process_channel(uint32_t channel)
+static void process_channel(
+    uint32_t channel,
+    const int16_t *source)
 {
-    load_channel_into_work_buffer(channel);
+    load_pcm16_channel_into_work_buffer(channel, source);
 
     /*
      * Pipeline identico a la version estable.
@@ -758,36 +558,33 @@ static void find_top_two_probabilities(
  * Procesamiento global
  * ----------------------------------------------------------------- */
 
-void drone_detection_process(void)
+bool drone_detection_process_window(const RecorderChunkView *window)
 {
-    if (!drone_detection_is_ready())
+    if ((window == NULL) ||
+        (window->frame_count != SAMPLES_PER_SECOND))
     {
-        return;
+        printf("[DET] ERROR: ventana PCM16 invalida\r\n");
+        return false;
     }
 
-    /*
-     * Orden obligatorio:
-     * Mic2 esta directamente en s_work_buffer.
-     * Los otros canales sobrescriben ese buffer al cargarse.
-     */
-    process_channel(CHANNEL_MIC2);
-    process_channel(CHANNEL_MIC4);
-    process_channel(CHANNEL_MIC3);
-    process_channel(CHANNEL_MIC1);
-
-    /*
-     * Los cuatro segundos ya fueron consumidos.
-     */
-    for (uint32_t channel = 0U;
-         channel < DET_CHANNELS;
-         channel++)
+    for (uint32_t channel = 0U; channel < DET_CHANNELS; channel++)
     {
-        s_ready[channel] = false;
+        if (window->channel[channel] == NULL)
+        {
+            printf("[DET] ERROR: canal %lu nulo\r\n",
+                   (unsigned long)channel);
+            return false;
+        }
     }
+
+    process_channel(CHANNEL_MIC2, window->channel[CHANNEL_MIC2]);
+    process_channel(CHANNEL_MIC4, window->channel[CHANNEL_MIC4]);
+    process_channel(CHANNEL_MIC3, window->channel[CHANNEL_MIC3]);
+    process_channel(CHANNEL_MIC1, window->channel[CHANNEL_MIC1]);
 
     if (!update_frozen_baseline())
     {
-        return;
+        return true;
     }
 
     uint32_t activity_count = 0U;
@@ -996,4 +793,6 @@ void drone_detection_process(void)
 
         alert_text
     );
+
+    return true;
 }

@@ -22,14 +22,28 @@
 #define N_FFT_BINS    (N_FFT / 2 + 1)
 #define TARGET_FRAMES MFCC_TARGET_FRAMES
 
-/* Buffers FFT separados — arm_rfft_fast_f32 requiere src != dst */
-__attribute__((section(".RAM_D2_bss")))
+/* Buffers FFT separados - arm_rfft_fast_f32 requiere src != dst. */
+__attribute__((section(".RAM_D2_dsp"), aligned(32)))
 static float s_fft_in[N_FFT];
 
-__attribute__((section(".RAM_D2_bss")))
+__attribute__((section(".RAM_D2_dsp"), aligned(32)))
 static float s_fft_out[2 * N_FFT];
 
+/* DSP scratch in DTCM keeps large temporary arrays off the stack. */
+__attribute__((section(".DTCM_dsp"), aligned(32)))
 static float s_hann[N_FFT];
+
+__attribute__((section(".DTCM_dsp"), aligned(32)))
+static float s_power[N_FFT_BINS];
+
+__attribute__((section(".DTCM_dsp"), aligned(32)))
+static float s_mel_a[N_MELS];
+
+__attribute__((section(".DTCM_dsp"), aligned(32)))
+static float s_mel_b[N_MELS];
+
+__attribute__((section(".DTCM_dsp"), aligned(32)))
+static float s_mfcc_frame[N_MFCC];
 
 static arm_rfft_fast_instance_f32 s_rfft;
 static bool s_inited = false;
@@ -46,6 +60,13 @@ static inline float reflect_at(const float *x, int n, int idx)
 bool mfcc_stm32_init(void)
 {
     if (s_inited) return true;
+
+    memset(s_fft_in, 0, sizeof(s_fft_in));
+    memset(s_fft_out, 0, sizeof(s_fft_out));
+    memset(s_power, 0, sizeof(s_power));
+    memset(s_mel_a, 0, sizeof(s_mel_a));
+    memset(s_mel_b, 0, sizeof(s_mel_b));
+    memset(s_mfcc_frame, 0, sizeof(s_mfcc_frame));
 
     for (int i = 0; i < N_FFT; i++)
         s_hann[i] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / (N_FFT - 1)));
@@ -94,30 +115,28 @@ static bool mfcc_compute_internal(const float *pcm, int n_in, mfcc_100x20_t *out
         /* FFT con buffers separados */
         arm_rfft_fast_f32(&s_rfft, s_fft_in, s_fft_out, 0);
 
-        float power[N_FFT_BINS];
-        power[0] = s_fft_out[0] * s_fft_out[0];
+        s_power[0] = s_fft_out[0] * s_fft_out[0];
         for (int k = 1; k < N_FFT / 2; k++) {
             float re = s_fft_out[2 * k];
             float im = s_fft_out[2 * k + 1];
-            power[k] = re * re + im * im;
+            s_power[k] = re * re + im * im;
         }
-        power[N_FFT / 2] = s_fft_out[1] * s_fft_out[1];
+        s_power[N_FFT / 2] = s_fft_out[1] * s_fft_out[1];
 
-        float mel_vec[N_MELS];
         for (int m = 0; m < N_MELS; m++) {
             uint32_t bin_start = k_mel_start[m];
             uint32_t length    = k_mel_length[m];
             uint32_t offset    = k_mel_offset[m];
             float acc = 0.0f;
             for (uint32_t j = 0; j < length; j++)
-                acc += power[bin_start + j] * k_mel_values[offset + j];
-            mel_vec[m] = acc;
+                acc += s_power[bin_start + j] * k_mel_values[offset + j];
+            s_mel_a[m] = acc;
         }
 
         for (int m = 0; m < N_MELS; m++) {
-            float val = mel_vec[m] < 1e-10f ? 1e-10f : mel_vec[m];
+            float val = s_mel_a[m] < 1e-10f ? 1e-10f : s_mel_a[m];
             float db  = 10.0f * log10f(val);
-            mel_vec[m] = db < -80.0f ? -80.0f : db;
+            s_mel_a[m] = db < -80.0f ? -80.0f : db;
         }
 
         float *dst = &out->data[f * N_MFCC];
@@ -125,7 +144,7 @@ static bool mfcc_compute_internal(const float *pcm, int n_in, mfcc_100x20_t *out
             const float *dct_row = &k_dct_matrix[c * N_MELS];
             float acc = 0.0f;
             for (int m = 0; m < N_MELS; m++)
-                acc += dct_row[m] * mel_vec[m];
+                acc += dct_row[m] * s_mel_a[m];
             dst[c] = acc;
         }
     }
@@ -191,50 +210,46 @@ void mfcc_stm32_export_frame(const float *pcm_1s, int frame_idx)
     arm_rfft_fast_f32(&s_rfft, s_fft_in, s_fft_out, 0);
 
     /* ── Potencia ─────────────────────────────────────────────── */
-    float power[N_FFT_BINS];
-    power[0] = s_fft_out[0] * s_fft_out[0];
+    s_power[0] = s_fft_out[0] * s_fft_out[0];
     for (int k = 1; k < N_FFT / 2; k++) {
         float re = s_fft_out[2 * k];
         float im = s_fft_out[2 * k + 1];
-        power[k] = re * re + im * im;
+        s_power[k] = re * re + im * im;
     }
-    power[N_FFT / 2] = s_fft_out[1] * s_fft_out[1];
+    s_power[N_FFT / 2] = s_fft_out[1] * s_fft_out[1];
 
     /* ── Banco Mel ────────────────────────────────────────────── */
-    float mel_energy[N_MELS];
     for (int m = 0; m < N_MELS; m++) {
         uint32_t bin_start = k_mel_start[m];
         uint32_t length    = k_mel_length[m];
         uint32_t offset    = k_mel_offset[m];
         float acc = 0.0f;
         for (uint32_t j = 0; j < length; j++)
-            acc += power[bin_start + j] * k_mel_values[offset + j];
-        mel_energy[m] = acc;
+            acc += s_power[bin_start + j] * k_mel_values[offset + j];
+        s_mel_a[m] = acc;
     }
 
     /* ── Mel dB ───────────────────────────────────────────────── */
-    float mel_db[N_MELS];
     for (int m = 0; m < N_MELS; m++) {
-        float val = mel_energy[m] < 1e-10f ? 1e-10f : mel_energy[m];
+        float val = s_mel_a[m] < 1e-10f ? 1e-10f : s_mel_a[m];
         float db  = 10.0f * log10f(val);
-        mel_db[m] = db < -80.0f ? -80.0f : db;
+        s_mel_b[m] = db < -80.0f ? -80.0f : db;
     }
 
     /* ── MFCC ─────────────────────────────────────────────────── */
-    float mfcc_frame[N_MFCC];
     for (int c = 0; c < N_MFCC; c++) {
         const float *dct_row = &k_dct_matrix[c * N_MELS];
         float acc = 0.0f;
         for (int m = 0; m < N_MELS; m++)
-            acc += dct_row[m] * mel_db[m];
-        mfcc_frame[c] = acc;
+            acc += dct_row[m] * s_mel_b[m];
+        s_mfcc_frame[c] = acc;
     }
 
     /* ── Exportar por UART ────────────────────────────────────── */
-    export_floats_uart("POWER",      power,      N_FFT_BINS);
-    export_floats_uart("MEL_ENERGY", mel_energy, N_MELS);
-    export_floats_uart("MEL_DB",     mel_db,     N_MELS);
-    export_floats_uart("MFCC_F",     mfcc_frame, N_MFCC);
+    export_floats_uart("POWER",      s_power,      N_FFT_BINS);
+    export_floats_uart("MEL_ENERGY", s_mel_a,      N_MELS);
+    export_floats_uart("MEL_DB",     s_mel_b,      N_MELS);
+    export_floats_uart("MFCC_F",     s_mfcc_frame, N_MFCC);
 
     printf("[MFCC_DIAG] Frame %d exportado\r\n", frame_idx);
 }

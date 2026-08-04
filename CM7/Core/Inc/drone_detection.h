@@ -2,15 +2,14 @@
 #define DRONE_DETECTION_H
 
 #include <stdbool.h>
+#include "audio_recorder.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 bool drone_detection_init(void);
-void drone_detection_accumulate(void);
-bool drone_detection_is_ready(void);
-void drone_detection_process(void);
+bool drone_detection_process_window(const RecorderChunkView *window);
 
 #ifdef __cplusplus
 }
