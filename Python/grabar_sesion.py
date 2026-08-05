@@ -7,6 +7,8 @@ Protocolo por canal:
   <88200 bytes int16 LE>     payload binario (44100 x 2)
   <4 bytes CRC32 LE>         checksum
   [CHx_END] sent=44100 errors=0\r\n  confirmacion ASCII
+  PC responde A (ACK) o N (retransmitir canal)
+Al guardar el chunk completo, PC responde K.
 
 Mapeo CH → microfono fisico:
   CH0 → Mic2 (B_odd,  SEL=VCC)
@@ -66,6 +68,14 @@ PLACEHOLDER_PROBABILITY    = 0
 
 CH_BIN_TAGS = ["[CH0_BIN]", "[CH1_BIN]", "[CH2_BIN]", "[CH3_BIN]"]
 CH_END_TAGS = ["[CH0_END]", "[CH1_END]", "[CH2_END]", "[CH3_END]"]
+
+CHANNEL_MAX_RETRIES = 3
+CHANNEL_READ_TIMEOUT = 15.0
+ASCII_LINE_TIMEOUT = 5.0
+CHANNEL_ACK = b"A"
+CHANNEL_NACK = b"N"
+CHUNK_SAVED_ACK = b"K"
+STOP_COMMAND = b"S"
 
 # ── Utilidades ────────────────────────────────────────────────────────────────
 
@@ -266,7 +276,14 @@ class GrabacionSession:
 
         if port:
             try:
-                self.ser = serial.Serial(port, baud, timeout=5.0)
+                self.ser = serial.Serial(port, baud, timeout=0.25)
+                try:
+                    self.ser.set_buffer_size(
+                        rx_size=1024 * 1024,
+                        tx_size=64 * 1024,
+                    )
+                except (AttributeError, OSError):
+                    pass
                 print(f"[UART] Conectado a {port} @ {baud} baud")
             except Exception as e:
                 print(f"[ERROR] {e}")
@@ -309,46 +326,178 @@ class GrabacionSession:
         self.stop = True
         if self.ser:
             try:
-                self.ser.write(b"STOP\n")
+                self.ser.write(STOP_COMMAND)
             except Exception:
                 pass
 
-    def _read_exact(self, n: int) -> bytes | None:
-        """Lee exactamente n bytes del puerto serie."""
-        buf = b""
-        while len(buf) < n and not self.stop:
-            try:
-                chunk = self.ser.read(n - len(buf))
-                if chunk:
-                    buf += chunk
-            except serial.SerialException as e:
-                print(f"\n[ERROR] UART read: {e}")
+    def _send_control(self, value: bytes) -> bool:
+        if self.ser is None:
+            return True
+        try:
+            self.ser.write(value)
+            self.ser.flush()
+            return True
+        except serial.SerialException as exc:
+            print(f"\n[ERROR] UART write: {exc}")
+            return False
+
+    def _read_exact(
+        self,
+        n: int,
+        timeout_s: float = CHANNEL_READ_TIMEOUT,
+    ) -> bytes | None:
+        """Lee exactamente n bytes con un tiempo limite absoluto."""
+        data = bytearray()
+        deadline = time.monotonic() + timeout_s
+
+        while len(data) < n and not self.stop:
+            if time.monotonic() >= deadline:
+                print(
+                    f"\n[ERROR] Timeout UART: "
+                    f"{len(data)}/{n} bytes recibidos"
+                )
                 return None
-        return buf if len(buf) == n else None
+
+            try:
+                chunk = self.ser.read(n - len(data))
+            except serial.SerialException as exc:
+                print(f"\n[ERROR] UART read: {exc}")
+                return None
+
+            if chunk:
+                data.extend(chunk)
+
+        return bytes(data) if len(data) == n else None
+
+    def _read_ascii_line(
+        self,
+        timeout_s: float = ASCII_LINE_TIMEOUT,
+    ) -> str | None:
+        data = bytearray()
+        deadline = time.monotonic() + timeout_s
+
+        while not self.stop and time.monotonic() < deadline:
+            try:
+                value = self.ser.read(1)
+            except serial.SerialException as exc:
+                print(f"\n[ERROR] UART read: {exc}")
+                return None
+
+            if not value:
+                continue
+
+            data.extend(value)
+            if value == b"\n":
+                return data.decode("ascii", errors="ignore").strip()
+
+        return None
+
+    def _wait_for_retry_header(
+        self,
+        ch_idx: int,
+        timeout_s: float = CHANNEL_READ_TIMEOUT,
+    ) -> bool:
+        """Descarta bytes hasta encontrar el header exacto del reintento."""
+        marker = f"[CH{ch_idx}_BIN]\r\n".encode("ascii")
+        matched = 0
+        deadline = time.monotonic() + timeout_s
+
+        while not self.stop and time.monotonic() < deadline:
+            try:
+                value = self.ser.read(1)
+            except serial.SerialException as exc:
+                print(f"\n[ERROR] UART read: {exc}")
+                return False
+
+            if not value:
+                continue
+
+            byte = value[0]
+            if byte == marker[matched]:
+                matched += 1
+                if matched == len(marker):
+                    return True
+            else:
+                matched = 1 if byte == marker[0] else 0
+
+        print(f"\n[ERROR] No llego el header de reintento CH{ch_idx}")
+        return False
 
     def _receive_channel_binary(self, ch_idx: int) -> list | None:
-        """
-        Lee el payload binario de un canal:
-          88200 bytes int16 LE + 4 bytes CRC32 LE
-        Devuelve lista de 44100 ints o None si hay error.
-        """
-        data = self._read_exact(CHANNEL_BYTES)
-        if data is None:
-            return None
+        expected_end = f"[CH{ch_idx}_END]"
 
-        payload  = data[:PAYLOAD_BYTES]
-        crc_recv = struct.unpack_from("<I", data, PAYLOAD_BYTES)[0]
+        for attempt in range(1, CHANNEL_MAX_RETRIES + 1):
+            data = self._read_exact(CHANNEL_BYTES)
 
-        # Verificar CRC32
-        crc_calc = zlib.crc32(payload) & 0xFFFFFFFF
-        if crc_calc != crc_recv:
-            print(f"\n[ERROR] CRC32 CH{ch_idx} — "
-                  f"calculado=0x{crc_calc:08X} recibido=0x{crc_recv:08X}")
-            return None
+            crc_ok = False
+            payload = b""
+            crc_calc = 0
+            crc_recv = 0
 
-        # Desempaquetar int16 LE
-        samples = list(struct.unpack_from(f"<{SAMPLES_CHUNK}h", payload))
-        return samples
+            if data is not None:
+                payload = data[:PAYLOAD_BYTES]
+                crc_recv = struct.unpack_from(
+                    "<I", data, PAYLOAD_BYTES
+                )[0]
+                crc_calc = zlib.crc32(payload) & 0xFFFFFFFF
+                crc_ok = crc_calc == crc_recv
+
+            end_line = None
+            report_ok = False
+
+            if crc_ok:
+                end_line = self._read_ascii_line()
+                report_ok = (
+                    end_line is not None
+                    and end_line.startswith(expected_end)
+                    and "sent=44100" in end_line
+                    and "errors=0" in end_line
+                )
+
+            if crc_ok and report_ok:
+                if not self._send_control(CHANNEL_ACK):
+                    return None
+                return list(
+                    struct.unpack_from(
+                        f"<{SAMPLES_CHUNK}h",
+                        payload,
+                    )
+                )
+
+            if data is not None and not crc_ok:
+                print(
+                    f"\n[WARN] CRC32 CH{ch_idx} intento {attempt}/"
+                    f"{CHANNEL_MAX_RETRIES}: "
+                    f"calculado=0x{crc_calc:08X} "
+                    f"recibido=0x{crc_recv:08X}"
+                )
+            elif crc_ok and not report_ok:
+                print(
+                    f"\n[WARN] Fin CH{ch_idx} invalido en intento "
+                    f"{attempt}: {end_line!r}"
+                )
+
+            if not self._send_control(CHANNEL_NACK):
+                return None
+
+            if attempt >= CHANNEL_MAX_RETRIES:
+                break
+
+            print(
+                f"\n[UART] Solicitando retransmision CH{ch_idx} "
+                f"({attempt + 1}/{CHANNEL_MAX_RETRIES})..."
+            )
+
+            if not self._wait_for_retry_header(ch_idx):
+                break
+
+        self._send_control(STOP_COMMAND)
+        self.stop = True
+        print(
+            f"\n[ERROR] CH{ch_idx} fallo despues de "
+            f"{CHANNEL_MAX_RETRIES} intentos"
+        )
+        return None
 
     def _receive_chunk(self) -> dict | None:
         """
@@ -466,10 +615,19 @@ class GrabacionSession:
 
                 sizes = [len(channels[ch]) for ch in range(4)]
                 if any(s != SAMPLES_CHUNK for s in sizes):
-                    print(f"\n[WARN] Chunk {self.order} incompleto {sizes} — descartado")
-                    continue
+                    print(f"\n[WARN] Chunk {self.order} incompleto {sizes} — sesion detenida")
+                    if not self.simulation:
+                        self._send_control(STOP_COMMAND)
+                    self.stop = True
+                    break
 
                 ok = save_chunk(channels, self.session_id, self.order, self.out_dir)
+                if not ok:
+                    if not self.simulation:
+                        self._send_control(STOP_COMMAND)
+                    self.stop = True
+                    break
+
                 if ok:
                     try:
                         self.next_sound_id = upsert_metadata_chunk(
@@ -481,7 +639,15 @@ class GrabacionSession:
                         save_metadata_atomic(self.metadata, self.metadata_path)
                     except Exception as exc:
                         print(f"\n[ERROR] No se pudo actualizar metadata: {exc}")
+                        if not self.simulation:
+                            self._send_control(STOP_COMMAND)
+                        self.stop = True
                         break
+
+                    if not self.simulation:
+                        if not self._send_control(CHUNK_SAVED_ACK):
+                            self.stop = True
+                            break
 
                     self.chunks_ok += 1
                     print(f"\n{'='*55}")

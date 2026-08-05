@@ -43,6 +43,16 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifndef DETECTION_VERBOSE_LOGS
+#define DETECTION_VERBOSE_LOGS 0
+#endif
+
+#if DETECTION_VERBOSE_LOGS
+#define DET_LOG(...) printf(__VA_ARGS__)
+#else
+#define DET_LOG(...) ((void)0)
+#endif
+
 /* -----------------------------------------------------------------
  * Audio y DSP
  * ----------------------------------------------------------------- */
@@ -186,6 +196,28 @@ static float s_ema = 0.0f;
 static uint8_t s_far_streak = 0U;
 static uint8_t s_alert_hold = 0U;
 
+static DroneDetectionResult s_last_result = {0};
+
+static void update_last_result(
+    float fused_probability,
+    uint8_t alert_level)
+{
+    for (uint32_t channel = 0U; channel < DET_CHANNELS; channel++)
+    {
+        s_last_result.probability[channel] = s_probability[channel];
+        s_last_result.dbfs[channel] = s_dbfs[channel];
+        s_last_result.delta_dbfs[channel] = s_delta_dbfs[channel];
+        s_last_result.valid[channel] = s_valid[channel] ? 1U : 0U;
+        s_last_result.acoustic_active[channel] =
+            s_acoustic_active[channel] ? 1U : 0U;
+    }
+
+    s_last_result.fused_probability = fused_probability;
+    s_last_result.ema = s_ema;
+    s_last_result.alert_level = alert_level;
+    s_last_result.baseline_ready = s_baseline_ready ? 1U : 0U;
+}
+
 /* -----------------------------------------------------------------
  * Load one recorded PCM16 channel into the shared float work buffer.
  * The HPF state remains independent and continuous for each microphone.
@@ -289,10 +321,10 @@ static void prepare_work_buffer_for_model(void)
 
 bool drone_detection_init(void)
 {
-    printf(
+    DET_LOG(
         "[DET] Inicializando 4 mics con baseline post-DSP congelado\r\n"
     );
-    printf(
+    DET_LOG(
         "[DET] Mantener silencio durante las primeras %u ventanas\r\n",
         (unsigned)BASELINE_CAL_WINDOWS
     );
@@ -317,6 +349,7 @@ bool drone_detection_init(void)
     memset(s_delta_dbfs, 0, sizeof(s_delta_dbfs));
     memset(s_acoustic_active, 0, sizeof(s_acoustic_active));
     memset(s_calibration_dbfs, 0, sizeof(s_calibration_dbfs));
+    memset(&s_last_result, 0, sizeof(s_last_result));
 
     for (uint32_t channel = 0U;
          channel < DET_CHANNELS;
@@ -335,17 +368,17 @@ bool drone_detection_init(void)
 
     if (!mfcc_stm32_init())
     {
-        printf("[DET] ERROR: mfcc_stm32_init fallo\r\n");
+        DET_LOG("[DET] ERROR: mfcc_stm32_init fallo\r\n");
         return false;
     }
 
     if (!model_runner_init())
     {
-        printf("[DET] ERROR: model_runner_init fallo\r\n");
+        DET_LOG("[DET] ERROR: model_runner_init fallo\r\n");
         return false;
     }
 
-    printf(
+    DET_LOG(
         "[DET] Sistema listo: ventana PCM16 compartida + 1 float, FAR=%u, "
         "margenes=[M1 %.1f M2 %.1f M3 %.1f M4 %.1f] dB\r\n",
         (unsigned)TICKS_FOR_PERSISTENCE,
@@ -463,7 +496,7 @@ static bool update_frozen_baseline(void)
 
     s_calibration_count++;
 
-    printf(
+    DET_LOG(
         "[CAL] %lu/%u M1=%5.1f M2=%5.1f M3=%5.1f M4=%5.1f dBFS\r\n",
         (unsigned long)s_calibration_count,
         (unsigned)BASELINE_CAL_WINDOWS,
@@ -495,7 +528,7 @@ static bool update_frozen_baseline(void)
     /*
      * La base queda congelada: no se vuelve a modificar.
      */
-    printf(
+    DET_LOG(
         "[BASE] M1=%5.1f(+%.1f) M2=%5.1f(+%.1f) "
         "M3=%5.1f(+%.1f) M4=%5.1f(+%.1f) dBFS\r\n",
         (double)s_baseline_dbfs[CHANNEL_MIC1],
@@ -563,7 +596,7 @@ bool drone_detection_process_window(const RecorderChunkView *window)
     if ((window == NULL) ||
         (window->frame_count != SAMPLES_PER_SECOND))
     {
-        printf("[DET] ERROR: ventana PCM16 invalida\r\n");
+        DET_LOG("[DET] ERROR: ventana PCM16 invalida\r\n");
         return false;
     }
 
@@ -571,7 +604,7 @@ bool drone_detection_process_window(const RecorderChunkView *window)
     {
         if (window->channel[channel] == NULL)
         {
-            printf("[DET] ERROR: canal %lu nulo\r\n",
+            DET_LOG("[DET] ERROR: canal %lu nulo\r\n",
                    (unsigned long)channel);
             return false;
         }
@@ -584,6 +617,7 @@ bool drone_detection_process_window(const RecorderChunkView *window)
 
     if (!update_frozen_baseline())
     {
+        update_last_result(0.0f, 0U);
         return true;
     }
 
@@ -748,7 +782,24 @@ bool drone_detection_process_window(const RecorderChunkView *window)
         alert_text = "*** DRON MANTENIDO ***";
     }
 
-    printf(
+    uint8_t alert_level = 0U;
+
+    if (red_alert)
+    {
+        alert_level = 3U;
+    }
+    else if (orange_alert)
+    {
+        alert_level = 2U;
+    }
+    else if (alert)
+    {
+        alert_level = 1U;
+    }
+
+    update_last_result(p_fused, alert_level);
+
+    DET_LOG(
         "[DET4] "
         "M1:%5.1f b=%5.1f d=%4.1f A=%u p=%.2f | "
         "M2:%5.1f b=%5.1f d=%4.1f A=%u p=%.2f | "
@@ -794,5 +845,16 @@ bool drone_detection_process_window(const RecorderChunkView *window)
         alert_text
     );
 
+    return true;
+}
+
+bool drone_detection_get_last_result(DroneDetectionResult *result)
+{
+    if (result == NULL)
+    {
+        return false;
+    }
+
+    *result = s_last_result;
     return true;
 }

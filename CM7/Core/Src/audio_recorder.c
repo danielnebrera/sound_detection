@@ -1,27 +1,14 @@
 /* =================================================================
- * audio_recorder.c - binary UART transmission with CRC32
+ * audio_recorder.c
  *
- * One raw PCM16 copy is kept for each microphone. The buffers are also
- * consumed by drone_detection, avoiding a second full audio window.
- *
- * Memory placement:
- *   CH0 / Mic2 -> RAM_D1
- *   CH1 / Mic4 -> RAM_D2
- *   CH2 / Mic3 -> RAM_D2
- *   CH3 / Mic1 -> DTCM
- *
- * UART protocol per channel:
- *   [CHx_BIN]\r\n
- *   <88200 bytes int16 little-endian>
- *   <4 bytes CRC32 little-endian>
- *   [CHx_END] sent=44100 errors=0\r\n
- *   PC -> A (ACK) o N (reintento)
- * Al terminar el chunk, PC envia K despues de guardar los JSON.
+ * Captura continua de 4 canales PCM16 en la SDRAM de la Portenta H7.
+ * No transmite ni procesa MFCC mientras SAI esta capturando.
  * ================================================================= */
 
 #include "audio_recorder.h"
 #include "audio_capture.h"
 #include "usart.h"
+#include "portenta_sdram.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -29,29 +16,30 @@
 extern UART_HandleTypeDef huart1;
 extern AudioCaptureContext g_audio_ctx;
 
-__attribute__((section(".RAM_D1_audio"), aligned(32)))
-static int16_t s_pcm_ch0[RECORD_FRAMES];
+/*
+ * La SDRAM ya fue validada en 0x60000000. Para esta primera integración
+ * accedemos mediante un puntero fijo, evitando que el linker intente
+ * reservar/cargar los 4.6 MiB dentro de RAM_D1 o FLASH.
+ *
+ * Tipo resultante:
+ *   s_session_pcm[chunk][channel][frame]
+ */
+static int16_t (*const s_session_pcm)
+    [RECORD_CHANNELS]
+    [RECORD_FRAMES] =
+        (int16_t (*)[RECORD_CHANNELS][RECORD_FRAMES])
+        PORTENTA_SDRAM_BASE_ADDRESS;
 
-__attribute__((section(".RAM_D2_audio"), aligned(32)))
-static int16_t s_pcm_ch1[RECORD_FRAMES];
+#define RECORD_SDRAM_REQUIRED_BYTES \
+    ((uint32_t)RECORD_TOTAL_STORAGE_CHUNKS * \
+     (uint32_t)RECORD_CHANNELS * \
+     (uint32_t)RECORD_FRAMES * \
+     (uint32_t)sizeof(int16_t))
 
-__attribute__((section(".RAM_D2_audio"), aligned(32)))
-static int16_t s_pcm_ch2[RECORD_FRAMES];
-
-__attribute__((section(".DTCM_audio"), aligned(32)))
-static int16_t s_pcm_ch3[RECORD_FRAMES];
-
-static int16_t *const s_pcm_channels[RECORD_CHANNELS] =
-{
-    s_pcm_ch0,
-    s_pcm_ch1,
-    s_pcm_ch2,
-    s_pcm_ch3
-};
-
-static uint32_t s_write_frame = 0U;
-static bool s_chunk_ready = false;
-static bool s_stop = false;
+static uint32_t s_total_frames = 0U;
+static bool s_capture_stop_requested = false;
+static bool s_capture_complete = false;
+static bool s_transfer_abort = false;
 
 #define UART_CHANNEL_MAX_RETRIES  3U
 #define UART_CHANNEL_ACK_TIMEOUT  10000U
@@ -60,8 +48,17 @@ static bool s_stop = false;
 
 #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
 _Static_assert(RECORD_FRAMES == 44100U, "Recorder expects 44100 frames");
-_Static_assert(sizeof(s_pcm_ch0) == 88200U, "Unexpected channel size");
+_Static_assert(RECORD_CHANNELS == 4U, "Recorder expects four channels");
+_Static_assert(
+    RECORD_SDRAM_REQUIRED_BYTES <= PORTENTA_SDRAM_SIZE_BYTES,
+    "Audio session buffer exceeds Portenta SDRAM capacity"
+);
 #endif
+
+static uint32_t minimum_u32(uint32_t a, uint32_t b)
+{
+    return (a < b) ? a : b;
+}
 
 static uint32_t crc32_update(
     uint32_t crc,
@@ -87,8 +84,7 @@ static uint32_t crc32_update(
 
 static inline int16_t pcm24_to_pcm16(int32_t value)
 {
-    int32_t sample =
-        (int32_t)((uint32_t)value & 0x00FFFFFFU);
+    int32_t sample = (int32_t)((uint32_t)value & 0x00FFFFFFU);
 
     if ((sample & 0x00800000L) != 0)
     {
@@ -98,8 +94,13 @@ static inline int16_t pcm24_to_pcm16(int32_t value)
     return (int16_t)(sample >> 8);
 }
 
-static void uart_puts(const char *text)
+void audio_recorder_send_text(const char *text)
 {
+    if (text == NULL)
+    {
+        return;
+    }
+
     HAL_UART_Transmit(
         &huart1,
         (uint8_t *)text,
@@ -108,19 +109,202 @@ static void uart_puts(const char *text)
     );
 }
 
-static bool check_stop(void)
+static bool uart_transmit_checked(
+    const uint8_t *data,
+    uint16_t size)
+{
+    return HAL_UART_Transmit(
+        &huart1,
+        (uint8_t *)data,
+        size,
+        HAL_MAX_DELAY
+    ) == HAL_OK;
+}
+
+void audio_recorder_init(void)
+{
+    /* No se limpia la SDRAM completa: cada muestra valida sera sobrescrita. */
+    s_total_frames = 0U;
+    s_capture_stop_requested = false;
+    s_capture_complete = false;
+    s_transfer_abort = false;
+}
+
+bool audio_recorder_poll_stop(void)
 {
     uint8_t command = 0U;
 
-    if (HAL_UART_Receive(&huart1, &command, 1U, 0U) == HAL_OK)
+    while (HAL_UART_Receive(&huart1, &command, 1U, 0U) == HAL_OK)
     {
         if (command == (uint8_t)'S')
         {
-            s_stop = true;
+            s_capture_stop_requested = true;
         }
     }
 
-    return s_stop;
+    return s_capture_stop_requested;
+}
+
+static bool stop_boundary_reached(void)
+{
+    const uint32_t minimum_frames =
+        (RECORD_CALIBRATION_CHUNKS + 1U) * RECORD_FRAMES;
+
+    return
+        s_capture_stop_requested &&
+        (s_total_frames >= minimum_frames) &&
+        ((s_total_frames % RECORD_FRAMES) == 0U);
+}
+
+bool audio_recorder_accumulate(void)
+{
+    if (s_capture_complete)
+    {
+        return true;
+    }
+
+    if (stop_boundary_reached() ||
+        (s_total_frames >= RECORD_TOTAL_STORAGE_FRAMES))
+    {
+        s_capture_complete = true;
+        return true;
+    }
+
+    int32_t *input[RECORD_CHANNELS] =
+    {
+        audio_capture_get_channel(&g_audio_ctx, 0U),
+        audio_capture_get_channel(&g_audio_ctx, 1U),
+        audio_capture_get_channel(&g_audio_ctx, 2U),
+        audio_capture_get_channel(&g_audio_ctx, 3U)
+    };
+
+    for (uint32_t channel = 0U; channel < RECORD_CHANNELS; channel++)
+    {
+        if (input[channel] == NULL)
+        {
+            return false;
+        }
+    }
+
+    uint32_t source_offset = 0U;
+
+    while ((source_offset < AUDIO_BUFFER_SIZE) && !s_capture_complete)
+    {
+        if (stop_boundary_reached())
+        {
+            s_capture_complete = true;
+            break;
+        }
+
+        if (s_total_frames >= RECORD_TOTAL_STORAGE_FRAMES)
+        {
+            s_capture_complete = true;
+            break;
+        }
+
+        const uint32_t absolute_chunk = s_total_frames / RECORD_FRAMES;
+        const uint32_t frame_in_chunk = s_total_frames % RECORD_FRAMES;
+        const uint32_t source_remaining = AUDIO_BUFFER_SIZE - source_offset;
+        const uint32_t chunk_remaining = RECORD_FRAMES - frame_in_chunk;
+        const uint32_t capacity_remaining =
+            RECORD_TOTAL_STORAGE_FRAMES - s_total_frames;
+
+        uint32_t copy_count = minimum_u32(source_remaining, chunk_remaining);
+        copy_count = minimum_u32(copy_count, capacity_remaining);
+
+        for (uint32_t channel = 0U; channel < RECORD_CHANNELS; channel++)
+        {
+            int16_t *destination =
+                &s_session_pcm[absolute_chunk][channel][frame_in_chunk];
+
+            for (uint32_t i = 0U; i < copy_count; i++)
+            {
+                destination[i] =
+                    pcm24_to_pcm16(input[channel][source_offset + i]);
+            }
+        }
+
+        source_offset += copy_count;
+        s_total_frames += copy_count;
+
+        if (stop_boundary_reached() ||
+            (s_total_frames >= RECORD_TOTAL_STORAGE_FRAMES))
+        {
+            s_capture_complete = true;
+        }
+    }
+
+    return true;
+}
+
+bool audio_recorder_capture_complete(void)
+{
+    return s_capture_complete;
+}
+
+bool audio_recorder_stop_requested(void)
+{
+    return s_capture_stop_requested;
+}
+
+uint32_t audio_recorder_total_frames(void)
+{
+    return s_total_frames;
+}
+
+uint32_t audio_recorder_total_completed_chunks(void)
+{
+    return s_total_frames / RECORD_FRAMES;
+}
+
+uint32_t audio_recorder_recorded_chunks(void)
+{
+    const uint32_t completed = audio_recorder_total_completed_chunks();
+
+    if (completed <= RECORD_CALIBRATION_CHUNKS)
+    {
+        return 0U;
+    }
+
+    return minimum_u32(
+        completed - RECORD_CALIBRATION_CHUNKS,
+        RECORD_MAX_OUTPUT_CHUNKS
+    );
+}
+
+bool audio_recorder_get_absolute_chunk_view(
+    uint32_t absolute_chunk,
+    RecorderChunkView *view)
+{
+    if ((view == NULL) ||
+        (absolute_chunk >= audio_recorder_total_completed_chunks()))
+    {
+        return false;
+    }
+
+    for (uint32_t channel = 0U; channel < RECORD_CHANNELS; channel++)
+    {
+        view->channel[channel] =
+            &s_session_pcm[absolute_chunk][channel][0];
+    }
+
+    view->frame_count = RECORD_FRAMES;
+    return true;
+}
+
+bool audio_recorder_get_record_chunk_view(
+    uint32_t record_chunk,
+    RecorderChunkView *view)
+{
+    if (record_chunk >= audio_recorder_recorded_chunks())
+    {
+        return false;
+    }
+
+    return audio_recorder_get_absolute_chunk_view(
+        RECORD_CALIBRATION_CHUNKS + record_chunk,
+        view
+    );
 }
 
 typedef enum
@@ -162,7 +346,7 @@ static UartControl wait_uart_control(uint32_t timeout_ms)
 
         if (command == (uint8_t)'S')
         {
-            s_stop = true;
+            s_transfer_abort = true;
             return UART_CONTROL_STOP;
         }
     }
@@ -170,36 +354,24 @@ static UartControl wait_uart_control(uint32_t timeout_ms)
     return UART_CONTROL_TIMEOUT;
 }
 
-static bool uart_transmit_checked(
-    const uint8_t *data,
-    uint16_t size)
-{
-    return HAL_UART_Transmit(
-        &huart1,
-        (uint8_t *)data,
-        size,
-        HAL_MAX_DELAY
-    ) == HAL_OK;
-}
-
-static bool emit_channel_once(uint32_t channel)
+static bool emit_channel_once(
+    uint32_t channel,
+    const int16_t *samples)
 {
     static const char *const channel_names[RECORD_CHANNELS] =
     {
         "CH0", "CH1", "CH2", "CH3"
     };
 
-    char header[64];
-    const uint8_t *payload =
-        (const uint8_t *)s_pcm_channels[channel];
-    const uint32_t payload_size =
-        RECORD_FRAMES * (uint32_t)sizeof(int16_t);
-    const uint32_t crc =
-        crc32_update(0U, payload, payload_size);
+    if ((channel >= RECORD_CHANNELS) || (samples == NULL))
+    {
+        return false;
+    }
 
-    uint32_t offset = 0U;
-    uint32_t sent_bytes = 0U;
-    uint32_t errors = 0U;
+    char header[64];
+    const uint8_t *payload = (const uint8_t *)samples;
+    const uint32_t payload_size = RECORD_FRAMES * sizeof(int16_t);
+    const uint32_t crc = crc32_update(0U, payload, payload_size);
 
     snprintf(
         header,
@@ -215,7 +387,9 @@ static bool emit_channel_once(uint32_t channel)
         return false;
     }
 
-    while ((offset < payload_size) && !s_stop)
+    uint32_t offset = 0U;
+
+    while ((offset < payload_size) && !s_transfer_abort)
     {
         uint32_t block_size = payload_size - offset;
 
@@ -224,32 +398,14 @@ static bool emit_channel_once(uint32_t channel)
             block_size = UART_TX_BLOCK_BYTES;
         }
 
-        bool block_sent = false;
-
-        for (uint32_t attempt = 0U;
-             attempt < 3U;
-             attempt++)
+        if (!uart_transmit_checked(
+                payload + offset,
+                (uint16_t)block_size))
         {
-            if (uart_transmit_checked(
-                    payload + offset,
-                    (uint16_t)block_size))
-            {
-                block_sent = true;
-                break;
-            }
-
-            HAL_Delay(2U);
+            return false;
         }
 
-        if (!block_sent)
-        {
-            errors += block_size / sizeof(int16_t);
-            break;
-        }
-
-        sent_bytes += block_size;
         offset += block_size;
-        check_stop();
     }
 
     const uint8_t crc_buffer[4] =
@@ -260,33 +416,28 @@ static bool emit_channel_once(uint32_t channel)
         (uint8_t)((crc >> 24U) & 0xFFU)
     };
 
-    const bool crc_sent =
-        uart_transmit_checked(crc_buffer, sizeof(crc_buffer));
+    if (!uart_transmit_checked(crc_buffer, sizeof(crc_buffer)))
+    {
+        return false;
+    }
 
     snprintf(
         header,
         sizeof(header),
-        "[%s_END] sent=%lu errors=%lu\r\n",
+        "[%s_END] sent=%lu errors=0\r\n",
         channel_names[channel],
-        (unsigned long)(sent_bytes / sizeof(int16_t)),
-        (unsigned long)errors
+        (unsigned long)RECORD_FRAMES
     );
 
-    const bool end_sent =
-        uart_transmit_checked(
-            (const uint8_t *)header,
-            (uint16_t)strlen(header)
-        );
-
-    return
-        !s_stop &&
-        (sent_bytes == payload_size) &&
-        (errors == 0U) &&
-        crc_sent &&
-        end_sent;
+    return uart_transmit_checked(
+        (const uint8_t *)header,
+        (uint16_t)strlen(header)
+    );
 }
 
-static bool emit_channel_with_retry(uint32_t channel)
+static bool emit_channel_with_retry(
+    uint32_t channel,
+    const int16_t *samples)
 {
     static const char *const channel_names[RECORD_CHANNELS] =
     {
@@ -297,16 +448,16 @@ static bool emit_channel_with_retry(uint32_t channel)
          attempt <= UART_CHANNEL_MAX_RETRIES;
          attempt++)
     {
-        const bool transmitted = emit_channel_once(channel);
+        const bool transmitted = emit_channel_once(channel, samples);
         const UartControl response =
             wait_uart_control(UART_CHANNEL_ACK_TIMEOUT);
 
-        if ((response == UART_CONTROL_ACK) && transmitted)
+        if (transmitted && (response == UART_CONTROL_ACK))
         {
             return true;
         }
 
-        if (response == UART_CONTROL_STOP)
+        if ((response == UART_CONTROL_STOP) || s_transfer_abort)
         {
             return false;
         }
@@ -322,185 +473,103 @@ static bool emit_channel_with_retry(uint32_t channel)
                 channel_names[channel],
                 (unsigned long)(attempt + 1U)
             );
-            uart_puts(message);
+            audio_recorder_send_text(message);
         }
-    }
-
-    {
-        char message[64];
-
-        snprintf(
-            message,
-            sizeof(message),
-            "[%s_FAILED] retries=%u\r\n",
-            channel_names[channel],
-            (unsigned)UART_CHANNEL_MAX_RETRIES
-        );
-        uart_puts(message);
     }
 
     return false;
 }
 
-void audio_recorder_init(void)
+bool audio_recorder_begin_transfer(uint32_t chunk_count)
 {
-    for (uint32_t channel = 0U; channel < RECORD_CHANNELS; channel++)
-    {
-        memset(
-            s_pcm_channels[channel],
-            0,
-            RECORD_FRAMES * sizeof(int16_t)
-        );
-    }
+    char message[128];
 
-    s_write_frame = 0U;
-    s_chunk_ready = false;
-    s_stop = false;
+    s_transfer_abort = false;
 
-    uart_puts("[RECORD_READY]\r\n");
+    snprintf(
+        message,
+        sizeof(message),
+        "[SESSION_START] chunks=%lu sample_rate=%lu channels=%u\r\n",
+        (unsigned long)chunk_count,
+        (unsigned long)RECORD_SAMPLE_RATE,
+        (unsigned)RECORD_CHANNELS
+    );
+
+    audio_recorder_send_text(message);
+    return true;
 }
 
-void audio_recorder_accumulate(void)
+bool audio_recorder_emit_record_chunk(
+    uint32_t record_chunk,
+    uint32_t order,
+    const char *metadata_line)
 {
-    if (s_chunk_ready)
-    {
-        return;
-    }
+    RecorderChunkView view = {0};
 
-    int32_t *input[RECORD_CHANNELS] =
-    {
-        audio_capture_get_channel(&g_audio_ctx, 0U),
-        audio_capture_get_channel(&g_audio_ctx, 1U),
-        audio_capture_get_channel(&g_audio_ctx, 2U),
-        audio_capture_get_channel(&g_audio_ctx, 3U)
-    };
-
-    for (uint32_t channel = 0U; channel < RECORD_CHANNELS; channel++)
-    {
-        if (input[channel] == NULL)
-        {
-            return;
-        }
-    }
-
-    uint32_t source_offset = 0U;
-
-    while (source_offset < AUDIO_BUFFER_SIZE)
-    {
-        const uint32_t source_remaining =
-            AUDIO_BUFFER_SIZE - source_offset;
-
-        const uint32_t chunk_remaining =
-            RECORD_FRAMES - s_write_frame;
-
-        const uint32_t copy_count =
-            (source_remaining < chunk_remaining)
-                ? source_remaining
-                : chunk_remaining;
-
-        for (uint32_t i = 0U; i < copy_count; i++)
-        {
-            const uint32_t source_index = source_offset + i;
-            const uint32_t destination_index = s_write_frame + i;
-
-            for (uint32_t channel = 0U;
-                 channel < RECORD_CHANNELS;
-                 channel++)
-            {
-                s_pcm_channels[channel][destination_index] =
-                    pcm24_to_pcm16(input[channel][source_index]);
-            }
-        }
-
-        source_offset += copy_count;
-        s_write_frame += copy_count;
-
-        if (s_write_frame == RECORD_FRAMES)
-        {
-            s_chunk_ready = true;
-            break;
-        }
-    }
-}
-
-bool audio_recorder_is_ready(void)
-{
-    return s_chunk_ready;
-}
-
-bool audio_recorder_get_chunk_view(RecorderChunkView *view)
-{
-    if ((view == NULL) || !s_chunk_ready)
+    if (!audio_recorder_get_record_chunk_view(record_chunk, &view))
     {
         return false;
     }
 
-    for (uint32_t channel = 0U; channel < RECORD_CHANNELS; channel++)
-    {
-        view->channel[channel] = s_pcm_channels[channel];
-    }
-
-    view->frame_count = RECORD_FRAMES;
-    return true;
-}
-
-bool audio_recorder_emit_and_reset(void)
-{
-    if (!s_chunk_ready)
-    {
-        return true;
-    }
-
-    char header[64];
+    char header[96];
 
     snprintf(
         header,
         sizeof(header),
-        "[CHUNK_START] %lu\r\n",
-        (unsigned long)RECORD_FRAMES
+        "[CHUNK_START] %lu order=%lu\r\n",
+        (unsigned long)RECORD_FRAMES,
+        (unsigned long)order
     );
-    uart_puts(header);
+    audio_recorder_send_text(header);
+
+    if (metadata_line != NULL)
+    {
+        audio_recorder_send_text(metadata_line);
+    }
 
     for (uint32_t channel = 0U;
-         (channel < RECORD_CHANNELS) && !s_stop;
+         (channel < RECORD_CHANNELS) && !s_transfer_abort;
          channel++)
     {
-        if (!emit_channel_with_retry(channel))
+        if (!emit_channel_with_retry(channel, view.channel[channel]))
         {
-            s_stop = true;
-            uart_puts("[CHUNK_ABORT] channel_transfer_failed\r\n");
+            audio_recorder_send_text(
+                "[CHUNK_ABORT] channel_transfer_failed\r\n"
+            );
             return false;
         }
     }
 
-    uart_puts("[CHUNK_END]\r\n");
+    audio_recorder_send_text("[CHUNK_END]\r\n");
 
-    const UartControl chunk_response =
+    const UartControl response =
         wait_uart_control(UART_CHUNK_ACK_TIMEOUT);
 
-    if (chunk_response != UART_CONTROL_CONTINUE)
+    if (response != UART_CONTROL_CONTINUE)
     {
-        if (chunk_response != UART_CONTROL_STOP)
+        if (response != UART_CONTROL_STOP)
         {
-            uart_puts("[CHUNK_ABORT] save_ack_timeout\r\n");
+            audio_recorder_send_text(
+                "[CHUNK_ABORT] save_ack_timeout\r\n"
+            );
         }
-
-        s_stop = true;
         return false;
     }
-
-    s_write_frame = 0U;
-    s_chunk_ready = false;
 
     return true;
 }
 
-bool audio_recorder_poll_stop(void)
+bool audio_recorder_end_transfer(uint32_t chunk_count)
 {
-    return check_stop();
-}
+    char message[96];
 
-bool audio_recorder_stop_requested(void)
-{
-    return s_stop;
+    snprintf(
+        message,
+        sizeof(message),
+        "[RECORD_DONE] chunks=%lu\r\n",
+        (unsigned long)chunk_count
+    );
+    audio_recorder_send_text(message);
+
+    return !s_transfer_abort;
 }
