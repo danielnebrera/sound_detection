@@ -1,6 +1,6 @@
 /**
  * @file audio_capture.h
- * @brief Captura sincronizada SAI2_A + SAI2_B para cuatro microfonos.
+ * @brief Captura SAI2 A/B sincronizada para cuatro microfonos.
  *
  * Mapeo validado:
  *   ch0 -> Mic2 -> SAI2_B slot impar -> left
@@ -8,12 +8,15 @@
  *   ch2 -> Mic3 -> SAI2_A slot par   -> back
  *   ch3 -> Mic1 -> SAI2_B slot par   -> right
  *
- * Cada evento HALF/FULL representa 512 muestras por microfono.
+ * Esta version no entrega buffers al foreground. Cuando las dos mitades
+ * A/B correspondientes estan listas, la callback publica el bloque directo
+ * al productor SDRAM de audio_recorder.
  */
 
 #ifndef AUDIO_CAPTURE_H
 #define AUDIO_CAPTURE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "main.h"
 
@@ -26,58 +29,38 @@
 #define AUDIO_DMA_BUFFER_SIZE \
     (AUDIO_BUFFER_SIZE * AUDIO_SLOTS_PER_FRAME * AUDIO_DMA_HALVES)
 
-typedef enum
+typedef struct
 {
-    AUDIO_BUFFER_EMPTY   = 0,
-    AUDIO_BUFFER_HALF    = 1,
-    AUDIO_BUFFER_FULL    = 2,
-    AUDIO_BUFFER_OVERRUN = 3
-} AudioBufferState;
+    volatile uint32_t dma_a_generation[AUDIO_DMA_HALVES];
+    volatile uint32_t dma_b_generation[AUDIO_DMA_HALVES];
+    volatile uint32_t consumed_generation[AUDIO_DMA_HALVES];
+
+    volatile uint32_t paired_blocks;
+    volatile uint32_t error_count;
+    volatile uint32_t overrun_count;
+    volatile uint32_t pair_mismatch_count;
+    volatile uint32_t maximum_pair_skew;
+    volatile uint8_t fatal_error;
+} AudioCaptureContext;
 
 typedef struct
 {
-    int32_t ch0[AUDIO_BUFFER_SIZE];
-    int32_t ch1[AUDIO_BUFFER_SIZE];
-    int32_t ch2[AUDIO_BUFFER_SIZE];
-    int32_t ch3[AUDIO_BUFFER_SIZE];
-
-    volatile uint32_t dma_a_half_produced;
-    volatile uint32_t dma_a_full_produced;
-    volatile uint32_t dma_b_half_produced;
-    volatile uint32_t dma_b_full_produced;
-
-    uint32_t dma_half_consumed;
-    uint32_t dma_full_consumed;
-
-    uint8_t expected_half;
-    volatile AudioBufferState buffer_state;
-
-    uint32_t blocks_processed;
-    uint32_t error_count;
-    uint32_t overrun_count;
-} AudioCaptureContext;
+    uint32_t paired_blocks;
+    uint32_t errors;
+    uint32_t overruns;
+    uint32_t pair_mismatches;
+    uint32_t maximum_pair_skew;
+    bool fatal_error;
+} AudioCaptureStats;
 
 int audio_capture_init(AudioCaptureContext *ctx);
 int audio_capture_start(AudioCaptureContext *ctx);
 int audio_capture_stop(AudioCaptureContext *ctx);
 
-AudioBufferState audio_capture_get_data(AudioCaptureContext *ctx);
-
-int32_t *audio_capture_get_channel(
-    AudioCaptureContext *ctx,
-    uint8_t channel
-);
-
-void audio_capture_deinterleave(
-    AudioCaptureContext *ctx,
-    uint8_t half
-);
-
+bool audio_capture_has_fatal_error(const AudioCaptureContext *ctx);
 void audio_capture_get_stats(
-    AudioCaptureContext *ctx,
-    uint32_t *blocks_processed,
-    uint32_t *errors,
-    uint32_t *overruns
+    const AudioCaptureContext *ctx,
+    AudioCaptureStats *stats
 );
 
 extern AudioCaptureContext g_audio_ctx;

@@ -1,99 +1,118 @@
 /* =================================================================
  * model_runner_stm32.cpp
- * Inferencia TFLite Micro para STM32H747 (CM7)
- * API: X-CUBE-AI 10.2.0 — tflm_c.h v2.2
+ * Inferencia TFLite Micro para STM32H747 (CM7).
  *
- * Entrada:  tensor float32 [1, 100, 20, 1]
- * Salida:   sigmoid escalar → probabilidad dron [0.0-1.0]
- * Arena:    160 KB en RAM_D1
+ * Esta version mantiene la arena y la API existentes, pero elimina el
+ * printf por inferencia para no interferir con la captura concurrente.
  * ================================================================= */
 
-/* tflm_c.h necesita estos tipos antes de incluirse */
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 
 #include "tflm_c.h"
-#include "network_tflite_data.h"   /* g_tflm_network_model_data[] */
+#include "network_tflite_data.h"
 #include "model_runner_stm32.h"
 
-/* ── Arena de memoria ─────────────────────────────────────────── */
-/* X-CUBE-AI reportó RAM: 143872 bytes. Ponemos 160 KB con margen. */
+#ifndef MODEL_RUNNER_VERBOSE_LOGS
+#define MODEL_RUNNER_VERBOSE_LOGS 0
+#endif
+
+#if MODEL_RUNNER_VERBOSE_LOGS
+#define MODEL_LOG(...) printf(__VA_ARGS__)
+#else
+#define MODEL_LOG(...) ((void)0)
+#endif
+
 #define TENSOR_ARENA_SIZE  (160 * 1024)
 
 __attribute__((section(".RAM_D1_model"), aligned(32)))
 static uint8_t s_tensor_arena[TENSOR_ARENA_SIZE];
 
-/* ── Handle del modelo (uint32_t según tflm_c.h) ─────────────── */
-static uint32_t s_hdl   = 0;
-static bool     s_inited = false;
+static uint32_t s_hdl = 0U;
+static bool s_inited = false;
 
-/* ── Inicialización ──────────────────────────────────────────── */
 extern "C" bool model_runner_init(void)
 {
-    if (s_inited) return true;
+    if (s_inited)
+    {
+        return true;
+    }
 
     memset(s_tensor_arena, 0, sizeof(s_tensor_arena));
 
-    TfLiteStatus st = tflm_c_create(
+    const TfLiteStatus status = tflm_c_create(
         g_tflm_network_model_data,
         s_tensor_arena,
         (uint32_t)TENSOR_ARENA_SIZE,
         &s_hdl
     );
 
-    if (st != kTfLiteOk) {
-        printf("[MODEL] ERROR tflm_c_create: %d\r\n", (int)st);
+    if (status != kTfLiteOk)
+    {
+        printf("[MODEL] ERROR tflm_c_create: %d\r\n", (int)status);
         return false;
     }
 
-    /* Verificar tensores */
-    struct tflm_c_tensor_info t_in  = {kTfLiteNoType};
-    struct tflm_c_tensor_info t_out = {kTfLiteNoType};
-    tflm_c_input (s_hdl, 0, &t_in);
-    tflm_c_output(s_hdl, 0, &t_out);
+    struct tflm_c_tensor_info input_info = {};
+    struct tflm_c_tensor_info output_info = {};
+    input_info.type = kTfLiteNoType;
+    output_info.type = kTfLiteNoType;
+    tflm_c_input(s_hdl, 0, &input_info);
+    tflm_c_output(s_hdl, 0, &output_info);
 
     s_inited = true;
-    printf("[MODEL] Init OK — Arena %d KB usados: %ld B\r\n",
-           TENSOR_ARENA_SIZE / 1024,
-           (long)tflm_c_arena_used_bytes(s_hdl));
-    printf("[MODEL] Input : %u bytes, tipo %d\r\n",
-           (unsigned)t_in.bytes,  (int)t_in.type);
-    printf("[MODEL] Output: %u bytes, tipo %d\r\n",
-           (unsigned)t_out.bytes, (int)t_out.type);
+
+    MODEL_LOG(
+        "[MODEL] Init OK - Arena %d KB usados: %ld B\r\n",
+        TENSOR_ARENA_SIZE / 1024,
+        (long)tflm_c_arena_used_bytes(s_hdl)
+    );
+    MODEL_LOG(
+        "[MODEL] Input: %u bytes, tipo %d\r\n",
+        (unsigned)input_info.bytes,
+        (int)input_info.type
+    );
+    MODEL_LOG(
+        "[MODEL] Output: %u bytes, tipo %d\r\n",
+        (unsigned)output_info.bytes,
+        (int)output_info.type
+    );
+
     return true;
 }
 
-/* ── Inferencia ──────────────────────────────────────────────── */
 extern "C" float model_runner_infer(const float *mfcc_data)
 {
-    if (!s_inited) {
-        printf("[MODEL] ERROR: no inicializado\r\n");
+    if (!s_inited || (mfcc_data == nullptr))
+    {
+        printf("[MODEL] ERROR: no inicializado o entrada nula\r\n");
         return -1.0f;
     }
 
-    /* Obtener info del tensor de entrada para saber tamaño */
-    struct tflm_c_tensor_info t_in = {kTfLiteNoType};
-    tflm_c_input(s_hdl, 0, &t_in);
+    struct tflm_c_tensor_info input_info = {};
+    input_info.type = kTfLiteNoType;
+    tflm_c_input(s_hdl, 0, &input_info);
+    memcpy(input_info.data, mfcc_data, input_info.bytes);
 
-    /* Copiar MFCC al buffer de entrada del modelo */
-    memcpy(t_in.data, mfcc_data, t_in.bytes);
-
-    /* Ejecutar inferencia */
-    TfLiteStatus st = tflm_c_invoke(s_hdl);
-    if (st != kTfLiteOk) {
-        printf("[MODEL] ERROR invoke: %d\r\n", (int)st);
+    const TfLiteStatus status = tflm_c_invoke(s_hdl);
+    if (status != kTfLiteOk)
+    {
+        printf("[MODEL] ERROR invoke: %d\r\n", (int)status);
         return -1.0f;
     }
 
-    /* Leer salida sigmoid [0.0-1.0] */
-    struct tflm_c_tensor_info t_out = {kTfLiteNoType};
-    tflm_c_output(s_hdl, 0, &t_out);
+    struct tflm_c_tensor_info output_info = {};
+    output_info.type = kTfLiteNoType;
+    tflm_c_output(s_hdl, 0, &output_info);
 
-    float p_drone   = ((float *)t_out.data)[0];
-    float p_nodrone = 1.0f - p_drone;
+    const float p_drone = ((float *)output_info.data)[0];
+    MODEL_LOG(
+        "[MODEL] NoDrone=%.4f Drone=%.4f\r\n",
+        (double)(1.0f - p_drone),
+        (double)p_drone
+    );
 
-    printf("[MODEL] NoDrone=%.4f Drone=%.4f\r\n", p_nodrone, p_drone);
     return p_drone;
 }
