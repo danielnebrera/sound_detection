@@ -48,231 +48,6 @@ static bool s_audio_running = false;
 static DroneDetectionResult s_record_results[RECORD_MAX_OUTPUT_CHUNKS];
 static bool s_record_result_valid[RECORD_MAX_OUTPUT_CHUNKS];
 
-typedef struct
-{
-    uint32_t sai_a_cr1;
-    uint32_t sai_a_cr2;
-    uint32_t sai_a_frcr;
-    uint32_t sai_a_slotr;
-    uint32_t sai_a_imr;
-    uint32_t sai_a_sr;
-
-    uint32_t sai_b_cr1;
-    uint32_t sai_b_cr2;
-    uint32_t sai_b_frcr;
-    uint32_t sai_b_slotr;
-    uint32_t sai_b_imr;
-    uint32_t sai_b_sr;
-
-    uint32_t dma0_cr;
-    uint32_t dma0_ndtr;
-    uint32_t dma0_par;
-    uint32_t dma0_m0ar;
-    uint32_t dma0_fcr;
-
-    uint32_t dma1_cr;
-    uint32_t dma1_ndtr;
-    uint32_t dma1_par;
-    uint32_t dma1_m0ar;
-    uint32_t dma1_fcr;
-
-    uint32_t gpioi_moder;
-    uint32_t gpioi_ospeedr;
-    uint32_t gpioi_pupdr;
-    uint32_t gpioi_afrl;
-
-    uint32_t gpiog_moder;
-    uint32_t gpiog_ospeedr;
-    uint32_t gpiog_pupdr;
-    uint32_t gpiog_afrh;
-
-    uint32_t rcc_d2ccip1r;
-
-    uint32_t hsai_a_state;
-    uint32_t hsai_a_error;
-    uint32_t hsai_b_state;
-    uint32_t hsai_b_error;
-
-    uint32_t hdma_a_state;
-    uint32_t hdma_a_error;
-    uint32_t hdma_b_state;
-    uint32_t hdma_b_error;
-} SaiDmaDiagSnapshot;
-
-static SaiDmaDiagSnapshot s_diag_pre_start;
-static SaiDmaDiagSnapshot s_diag_after_start;
-static SaiDmaDiagSnapshot s_diag_after_stop;
-
-static void sai_dma_diag_snapshot(SaiDmaDiagSnapshot *snapshot)
-{
-    if (snapshot == NULL)
-    {
-        return;
-    }
-
-    snapshot->sai_a_cr1   = SAI2_Block_A->CR1;
-    snapshot->sai_a_cr2   = SAI2_Block_A->CR2;
-    snapshot->sai_a_frcr  = SAI2_Block_A->FRCR;
-    snapshot->sai_a_slotr = SAI2_Block_A->SLOTR;
-    snapshot->sai_a_imr   = SAI2_Block_A->IMR;
-    snapshot->sai_a_sr    = SAI2_Block_A->SR;
-
-    snapshot->sai_b_cr1   = SAI2_Block_B->CR1;
-    snapshot->sai_b_cr2   = SAI2_Block_B->CR2;
-    snapshot->sai_b_frcr  = SAI2_Block_B->FRCR;
-    snapshot->sai_b_slotr = SAI2_Block_B->SLOTR;
-    snapshot->sai_b_imr   = SAI2_Block_B->IMR;
-    snapshot->sai_b_sr    = SAI2_Block_B->SR;
-
-    snapshot->dma0_cr   = DMA1_Stream0->CR;
-    snapshot->dma0_ndtr = DMA1_Stream0->NDTR;
-    snapshot->dma0_par  = DMA1_Stream0->PAR;
-    snapshot->dma0_m0ar = DMA1_Stream0->M0AR;
-    snapshot->dma0_fcr  = DMA1_Stream0->FCR;
-
-    snapshot->dma1_cr   = DMA1_Stream1->CR;
-    snapshot->dma1_ndtr = DMA1_Stream1->NDTR;
-    snapshot->dma1_par  = DMA1_Stream1->PAR;
-    snapshot->dma1_m0ar = DMA1_Stream1->M0AR;
-    snapshot->dma1_fcr  = DMA1_Stream1->FCR;
-
-    snapshot->gpioi_moder   = GPIOI->MODER;
-    snapshot->gpioi_ospeedr = GPIOI->OSPEEDR;
-    snapshot->gpioi_pupdr   = GPIOI->PUPDR;
-    snapshot->gpioi_afrl    = GPIOI->AFR[0];
-
-    snapshot->gpiog_moder   = GPIOG->MODER;
-    snapshot->gpiog_ospeedr = GPIOG->OSPEEDR;
-    snapshot->gpiog_pupdr   = GPIOG->PUPDR;
-    snapshot->gpiog_afrh    = GPIOG->AFR[1];
-
-    snapshot->rcc_d2ccip1r = RCC->D2CCIP1R;
-
-    snapshot->hsai_a_state = (uint32_t)hsai_BlockA2.State;
-    snapshot->hsai_a_error = (uint32_t)hsai_BlockA2.ErrorCode;
-    snapshot->hsai_b_state = (uint32_t)hsai_BlockB2.State;
-    snapshot->hsai_b_error = (uint32_t)hsai_BlockB2.ErrorCode;
-
-    snapshot->hdma_a_state = (uint32_t)hdma_sai2_a.State;
-    snapshot->hdma_a_error = (uint32_t)hdma_sai2_a.ErrorCode;
-    snapshot->hdma_b_state = (uint32_t)hdma_sai2_b.State;
-    snapshot->hdma_b_error = (uint32_t)hdma_sai2_b.ErrorCode;
-}
-
-static void sai_dma_diag_emit_one(
-    const char *phase,
-    const SaiDmaDiagSnapshot *s)
-{
-    char message[256];
-
-    if ((phase == NULL) || (s == NULL))
-    {
-        return;
-    }
-
-    snprintf(
-        message,
-        sizeof(message),
-        "[REG_SAI_A] phase=%s CR1=%08lX CR2=%08lX FRCR=%08lX "
-        "SLOTR=%08lX IMR=%08lX SR=%08lX state=%lu err=%08lX\r\n",
-        phase,
-        (unsigned long)s->sai_a_cr1,
-        (unsigned long)s->sai_a_cr2,
-        (unsigned long)s->sai_a_frcr,
-        (unsigned long)s->sai_a_slotr,
-        (unsigned long)s->sai_a_imr,
-        (unsigned long)s->sai_a_sr,
-        (unsigned long)s->hsai_a_state,
-        (unsigned long)s->hsai_a_error
-    );
-    uart_send(message);
-
-    snprintf(
-        message,
-        sizeof(message),
-        "[REG_SAI_B] phase=%s CR1=%08lX CR2=%08lX FRCR=%08lX "
-        "SLOTR=%08lX IMR=%08lX SR=%08lX state=%lu err=%08lX\r\n",
-        phase,
-        (unsigned long)s->sai_b_cr1,
-        (unsigned long)s->sai_b_cr2,
-        (unsigned long)s->sai_b_frcr,
-        (unsigned long)s->sai_b_slotr,
-        (unsigned long)s->sai_b_imr,
-        (unsigned long)s->sai_b_sr,
-        (unsigned long)s->hsai_b_state,
-        (unsigned long)s->hsai_b_error
-    );
-    uart_send(message);
-
-    snprintf(
-        message,
-        sizeof(message),
-        "[REG_DMA0] phase=%s CR=%08lX NDTR=%lu PAR=%08lX "
-        "M0AR=%08lX FCR=%08lX state=%lu err=%08lX\r\n",
-        phase,
-        (unsigned long)s->dma0_cr,
-        (unsigned long)s->dma0_ndtr,
-        (unsigned long)s->dma0_par,
-        (unsigned long)s->dma0_m0ar,
-        (unsigned long)s->dma0_fcr,
-        (unsigned long)s->hdma_a_state,
-        (unsigned long)s->hdma_a_error
-    );
-    uart_send(message);
-
-    snprintf(
-        message,
-        sizeof(message),
-        "[REG_DMA1] phase=%s CR=%08lX NDTR=%lu PAR=%08lX "
-        "M0AR=%08lX FCR=%08lX state=%lu err=%08lX\r\n",
-        phase,
-        (unsigned long)s->dma1_cr,
-        (unsigned long)s->dma1_ndtr,
-        (unsigned long)s->dma1_par,
-        (unsigned long)s->dma1_m0ar,
-        (unsigned long)s->dma1_fcr,
-        (unsigned long)s->hdma_b_state,
-        (unsigned long)s->hdma_b_error
-    );
-    uart_send(message);
-
-    snprintf(
-        message,
-        sizeof(message),
-        "[REG_GPIO] phase=%s "
-        "PI_MODER=%08lX PI_SPEED=%08lX PI_PUPD=%08lX PI_AFRL=%08lX "
-        "PG_MODER=%08lX PG_SPEED=%08lX PG_PUPD=%08lX PG_AFRH=%08lX\r\n",
-        phase,
-        (unsigned long)s->gpioi_moder,
-        (unsigned long)s->gpioi_ospeedr,
-        (unsigned long)s->gpioi_pupdr,
-        (unsigned long)s->gpioi_afrl,
-        (unsigned long)s->gpiog_moder,
-        (unsigned long)s->gpiog_ospeedr,
-        (unsigned long)s->gpiog_pupdr,
-        (unsigned long)s->gpiog_afrh
-    );
-    uart_send(message);
-
-    snprintf(
-        message,
-        sizeof(message),
-        "[REG_RCC] phase=%s D2CCIP1R=%08lX\r\n",
-        phase,
-        (unsigned long)s->rcc_d2ccip1r
-    );
-    uart_send(message);
-}
-
-static void sai_dma_diag_emit_all(void)
-{
-    uart_send("[REG_DUMP_BEGIN]\r\n");
-    sai_dma_diag_emit_one("PRE_START", &s_diag_pre_start);
-    sai_dma_diag_emit_one("AFTER_START", &s_diag_after_start);
-    sai_dma_diag_emit_one("AFTER_STOP", &s_diag_after_stop);
-    uart_send("[REG_DUMP_END]\r\n");
-}
-
 static void uart_send(const char *text)
 {
     if (text == NULL)
@@ -411,17 +186,11 @@ static bool start_audio_capture(void)
         return false;
     }
 
-    /* Solo snapshot en RAM: no se transmite nada durante la captura. */
-    sai_dma_diag_snapshot(&s_diag_pre_start);
-
     if (audio_capture_start(&g_audio_ctx) != 0)
     {
         audio_recorder_disarm_stop_receiver();
         return false;
     }
-
-    /* Ambos SAI/DMA ya fueron arrancados. Solo lectura de registros a RAM. */
-    sai_dma_diag_snapshot(&s_diag_after_start);
 
     s_audio_running = true;
     HAL_Delay(20U);
@@ -731,8 +500,6 @@ int main(void)
                 stop_with_error("[AUDIO_CAPTURE_STOP_FAIL]\r\n");
             }
 
-            sai_dma_diag_snapshot(&s_diag_after_stop);
-
             s_audio_running = false;
             LED_OFF(LED_GREEN_Pin);
             LED_ON(LED_BLUE_Pin);
@@ -767,12 +534,6 @@ int main(void)
     AudioCaptureStats capture_stats = {0};
     audio_recorder_get_stats(&recorder_stats);
     audio_capture_get_stats(&g_audio_ctx, &capture_stats);
-
-    /*
-     * La captura y DMA ya estan detenidos. Ahora si imprimimos los snapshots.
-     * No se hace UART/printf durante la fase critica de grabacion.
-     */
-    sai_dma_diag_emit_all();
 
     {
         char message[320];
