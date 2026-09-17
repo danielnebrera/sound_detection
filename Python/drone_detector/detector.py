@@ -62,10 +62,15 @@ class DetectorConfig:
     harmonic: bool             = True
 
     # Que puntuacion alimenta la EMA y, por tanto, las alertas:
-    #   "harmonic" -> H  (por defecto: el modelo da 1.00 con cualquier ruido)
-    #   "model"    -> p  (comportamiento del firmware)
-    #   "both"     -> min(p, H): tienen que coincidir los dos
-    decision: str              = "harmonic"
+    #   "model"    -> p  (por defecto). Medido sobre 3000 clips etiquetados con
+    #                     el pipeline "training": AUC 1.000, cero errores, con un
+    #                     hueco de 0.91 entre la peor deteccion y el peor falso
+    #                     positivo. La H se queda muy por detras (AUC 0.777).
+    #   "harmonic" -> H  invariante al volumen y explicable, pero pierde 403 de
+    #                     cada 1500 drones. Util como diagnostico, no para decidir.
+    #   "both"     -> min(p, H). NO usar: la H arrastra al minimo y se pierden
+    #                     drones que el modelo detecta perfectamente.
+    decision: str              = "model"
 
     # Ruta al modelo (por defecto: Python/drone_mfcc_model.tflite)
     model_path: str = str(Path(__file__).resolve().parent.parent / "drone_mfcc_model.tflite")

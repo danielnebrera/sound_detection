@@ -26,3 +26,7 @@ venv/
 __pycache__/
 *.pyc
 Python/dataset/
+
+# Datasets de audio (pesados, fuera del repo)
+dataset_44k_combined_daataset_1s/
+*.rar

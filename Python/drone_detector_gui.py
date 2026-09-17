@@ -777,8 +777,9 @@ def main() -> None:
     parser.add_argument("--refresh", type=int, default=0,
                         help="Milisegundos entre refrescos. 0 = al ritmo de --hop")
     parser.add_argument("--decide", choices=("harmonic", "model", "both"),
-                        default="harmonic",
-                        help="Qué puntuación dispara las alertas (def harmonic)")
+                        default="model",
+                        help="Qué puntuación dispara las alertas (def model: "
+                             "AUC 1.000 frente a 0.777 de la H)")
     parser.add_argument("--no-harmonic", action="store_true",
                         help="No calcular H (ahorra ~40 ms por segundo)")
     parser.add_argument("--agc", action="store_true",

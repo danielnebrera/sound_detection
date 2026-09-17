@@ -323,15 +323,43 @@ lejano —que apenas sobresale del ambiente— llegue a disparar, baja
 
 Cuesta unos 40 ms por segundo de audio. Se desactiva con `--no-harmonic`.
 
+## Evaluado contra el dataset etiquetado
+
+`dataset_44k_combined_daataset_1s` (5120 dron + 5120 no dron, clips de 1 s a
+44.1 kHz). Sobre una muestra aleatoria de 3000:
+
+| métrica | AUC | precisión | recall | F1 |
+|---|---|---|---|---|
+| **P · pipeline `training`** | **1.000** | 1.000 | 1.000 | **1.000** |
+| P · pipeline del firmware | 0.757 | 0.610 | 1.000 | 0.758 |
+| H · peine armónico | 0.777 | 0.729 | 0.731 | 0.730 |
+
+La separación de P es real, no un redondeo: el peor clip de dron saca 0.999382 y
+el peor de no-dron 0.086072, un hueco de **0.91**. Cero errores con cualquier
+umbral entre 0.1 y 0.9.
+
+**El modelo siempre estuvo bien.** Lo que estaba roto era el pipeline: con el
+del firmware el AUC cae de 1.000 a 0.757.
+
+> Advertencia importante: es casi seguro que estos clips son los mismos con los
+> que se entrenó (`modelo_tensor_audio_MFFCs.py` hace 5-fold sobre todo el
+> conjunto, así que el modelo campeón vio el 80 % de ellos). Esto demuestra que
+> **el pipeline ya es correcto**, no que el modelo generalice a drones o entornos
+> nuevos. Para medir eso hace falta audio que no esté en el dataset.
+
+La H se queda en 0.777: pierde 403 de cada 1500 drones y da 50 falsas alarmas
+por encima de 0.6. Sigue siendo útil como diagnóstico —es invariante al volumen
+y se puede explicar— pero ya no decide.
+
 ## Quién decide la alerta: `--decide`
 
-Por defecto **la alerta la decide H**, no el modelo. `--decide` lo cambia:
+Por defecto **la alerta la decide el modelo** (`model`). `--decide` lo cambia:
 
 | valor | qué alimenta la EMA |
 |---|---|
-| `harmonic` (def) | H — parecido con la firma de un dron |
-| `model` | p de la red — comportamiento del firmware |
-| `both` | `min(p, H)`: las dos tienen que coincidir |
+| `model` (def) | p de la red — AUC 1.000 sobre el dataset |
+| `harmonic` | H — invariante al volumen, pero AUC 0.777 |
+| `both` | `min(p, H)` — **no usar**: la H arrastra al mínimo y se pierden drones que el modelo detecta sin problema |
 
 La EMA, la persistencia y los umbrales (0.25 / 0.60 / 0.85) siguen siendo los de
 `drone_detection.c`; lo único que cambia es qué número entra en ellos.

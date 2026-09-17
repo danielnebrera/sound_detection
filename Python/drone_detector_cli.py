@@ -381,10 +381,10 @@ def add_common(p, with_mode=True):
                    help="Cada cuántos segundos se reanaliza. La ventana sigue "
                         "siendo de 1 s; 1.0 = sin solape, como el firmware (def 1.0)")
     p.add_argument("--decide", choices=("harmonic", "model", "both"),
-                   default="harmonic",
-                   help="Qué puntuación dispara las alertas: harmonic = H (def), "
-                        "model = p de la red (da 1.00 con casi cualquier ruido), "
-                        "both = las dos a la vez")
+                   default="model",
+                   help="Qué puntuación dispara las alertas: model = p de la red "
+                        "(def; AUC 1.000 sobre el dataset etiquetado), harmonic = H "
+                        "(AUC 0.777, pierde drones), both = mín(p,H), peor que model")
     p.add_argument("--no-harmonic", action="store_true",
                    help="No calcular la puntuación de peine armónico (ahorra ~40 ms "
                         "por segundo de audio)")
