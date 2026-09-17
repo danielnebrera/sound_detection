@@ -22,3 +22,7 @@ Thumbs.db
 
 # Environment
 venv/
+# Python
+__pycache__/
+*.pyc
+Python/dataset/
