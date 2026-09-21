@@ -47,26 +47,28 @@
 									<listOptionValue builtIn="false" value="USE_PWR_LDO_SUPPLY"/>
 								</option>
 								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.option.includepaths.647385557" name="Include paths (-I)" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.option.includepaths" useByScannerDiscovery="false" valueType="includePath">
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/tensorflow/lite/micro/memory_planner"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/tensorflow/lite/micro/kernels"/>
 									<listOptionValue builtIn="false" value="../Core/Inc"/>
 									<listOptionValue builtIn="false" value="../../Drivers/CMSIS/Device/ST/STM32H7xx/Include"/>
 									<listOptionValue builtIn="false" value="../../Drivers/CMSIS/Include"/>
 									<listOptionValue builtIn="false" value="../../Drivers/CMSIS/Device/ST/STM32H7xx/Include"/>
 									<listOptionValue builtIn="false" value="../../Drivers/CMSIS/Device/ST/STM32H7xx/Include"/>
 									<listOptionValue builtIn="false" value="../Core/Inc"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/tensorflow/lite"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/tensorflow"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/third_party/cmsis_nn"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/tensorflow/lite/micro/tflite_bridge"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/tensorflow/lite/micro/memory_planner"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/tensorflow/lite/micro/kernels"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/tensorflow/lite/kernels/internal/reference"/>
 									<listOptionValue builtIn="false" value="C:/Users/jaene/STM32Cube/Repository/STM32Cube_FW_H7_V1.13.0/Drivers/CMSIS/DSP/Include"/>
 									<listOptionValue builtIn="false" value="C:/Users/jaene/STM32Cube/Repository/STM32Cube_FW_H7_V1.13.0/Drivers/CMSIS/Include"/>
 									<listOptionValue builtIn="false" value="../X-CUBE-AI/App"/>
-									<listOptionValue builtIn="false" value="&quot;C:/Users/jaene/Desktop/ModeloLocalizacion/DOC SetUp/DOC SetUp/Portenta_H7_BlinkingLED/CM7/Middlewares/tensorflow/tensorflow/lite&quot;"/>
-									<listOptionValue builtIn="false" value="&quot;C:/Users/jaene/Desktop/ModeloLocalizacion/DOC SetUp/DOC SetUp/Portenta_H7_BlinkingLED/CM7/Middlewares/tensorflow/tensorflow&quot;"/>
-									<listOptionValue builtIn="false" value="&quot;C:/Users/jaene/Desktop/ModeloLocalizacion/DOC SetUp/DOC SetUp/Portenta_H7_BlinkingLED/CM7/Middlewares/tensorflow/third_party/cmsis_nn&quot;"/>
 									<listOptionValue builtIn="false" value="../../Drivers/STM32H7xx_HAL_Driver/Inc"/>
 									<listOptionValue builtIn="false" value="../../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy"/>
 									<listOptionValue builtIn="false" value="../../Drivers/CMSIS/Device/ST/STM32H7xx/Include"/>
-									<listOptionValue builtIn="false" value="C:/Users/jaene/Desktop/ModeloLocalizacion/DOC SetUp/DOC SetUp/Portenta_H7_BlinkingLED/CM7/Middlewares/tensorflow"/>
-									<listOptionValue builtIn="false" value="C:/Users/jaene/Desktop/ModeloLocalizacion/DOC SetUp/DOC SetUp/Portenta_H7_BlinkingLED/CM7/Middlewares/tensorflow/tensorflow/lite/micro/tflite_bridge"/>
-									<listOptionValue builtIn="false" value="C:/Users/jaene/Desktop/ModeloLocalizacion/DOC SetUp/DOC SetUp/Portenta_H7_BlinkingLED/CM7/Middlewares/tensorflow/tensorflow/lite/micro/memory_planner"/>
-									<listOptionValue builtIn="false" value="C:/Users/jaene/Desktop/ModeloLocalizacion/DOC SetUp/DOC SetUp/Portenta_H7_BlinkingLED/CM7/Middlewares/tensorflow/tensorflow/lite/micro/kernels"/>
-									<listOptionValue builtIn="false" value="C:/Users/jaene/Desktop/ModeloLocalizacion/DOC SetUp/DOC SetUp/Portenta_H7_BlinkingLED/CM7/Middlewares/tensorflow/tensorflow/lite/kernels/internal/reference"/>
 									<listOptionValue builtIn="false" value="C:/Users/jaene/STM32Cube/Repository/Packs/STMicroelectronics/X-CUBE-AI/10.2.0/Middlewares/tensorflow/third_party/flatbuffers/include"/>
 									<listOptionValue builtIn="false" value="C:/Users/jaene/STM32Cube/Repository/Packs/STMicroelectronics/X-CUBE-AI/10.2.0/Middlewares/tensorflow/third_party/gemmlowp"/>
 									<listOptionValue builtIn="false" value="C:/Users/jaene/STM32Cube/Repository/Packs/STMicroelectronics/X-CUBE-AI/10.2.0/Middlewares/tensorflow/third_party/cmsis_nn/Include"/>
@@ -88,23 +90,28 @@
 									<listOptionValue builtIn="false" value="USE_PWR_LDO_SUPPLY"/>
 								</option>
 								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.cpp.compiler.option.includepaths.647385557" name="Include paths (-I)" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.cpp.compiler.option.includepaths" useByScannerDiscovery="false" valueType="includePath">
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/tensorflow/lite/micro/memory_planner"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/tensorflow/lite/micro/kernels"/>
 									<listOptionValue builtIn="false" value="../Core/Inc"/>
+									<listOptionValue builtIn="false" value="../../Drivers/CMSIS/Device/ST/STM32H7xx/Include"/>
 									<listOptionValue builtIn="false" value="../../Drivers/CMSIS/Include"/>
 									<listOptionValue builtIn="false" value="../../Drivers/CMSIS/Device/ST/STM32H7xx/Include"/>
 									<listOptionValue builtIn="false" value="../../Drivers/CMSIS/Device/ST/STM32H7xx/Include"/>
+									<listOptionValue builtIn="false" value="../Core/Inc"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/tensorflow/lite"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/tensorflow"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/third_party/cmsis_nn"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/tensorflow/lite/micro/tflite_bridge"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/tensorflow/lite/micro/memory_planner"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/tensorflow/lite/micro/kernels"/>
+									<listOptionValue builtIn="false" value="../Middlewares/tensorflow/tensorflow/lite/kernels/internal/reference"/>
 									<listOptionValue builtIn="false" value="C:/Users/jaene/STM32Cube/Repository/STM32Cube_FW_H7_V1.13.0/Drivers/CMSIS/DSP/Include"/>
 									<listOptionValue builtIn="false" value="C:/Users/jaene/STM32Cube/Repository/STM32Cube_FW_H7_V1.13.0/Drivers/CMSIS/Include"/>
 									<listOptionValue builtIn="false" value="../X-CUBE-AI/App"/>
-									<listOptionValue builtIn="false" value="&quot;C:/Users/jaene/Desktop/ModeloLocalizacion/DOC SetUp/DOC SetUp/Portenta_H7_BlinkingLED/CM7/Middlewares/tensorflow/tensorflow/lite&quot;"/>
-									<listOptionValue builtIn="false" value="&quot;C:/Users/jaene/Desktop/ModeloLocalizacion/DOC SetUp/DOC SetUp/Portenta_H7_BlinkingLED/CM7/Middlewares/tensorflow/tensorflow&quot;"/>
-									<listOptionValue builtIn="false" value="&quot;C:/Users/jaene/Desktop/ModeloLocalizacion/DOC SetUp/DOC SetUp/Portenta_H7_BlinkingLED/CM7/Middlewares/tensorflow/third_party/cmsis_nn&quot;"/>
 									<listOptionValue builtIn="false" value="../../Drivers/STM32H7xx_HAL_Driver/Inc"/>
 									<listOptionValue builtIn="false" value="../../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy"/>
-									<listOptionValue builtIn="false" value="C:/Users/jaene/Desktop/ModeloLocalizacion/DOC SetUp/DOC SetUp/Portenta_H7_BlinkingLED/CM7/Middlewares/tensorflow"/>
-									<listOptionValue builtIn="false" value="C:/Users/jaene/Desktop/ModeloLocalizacion/DOC SetUp/DOC SetUp/Portenta_H7_BlinkingLED/CM7/Middlewares/tensorflow/tensorflow/lite/micro/tflite_bridge"/>
-									<listOptionValue builtIn="false" value="C:/Users/jaene/Desktop/ModeloLocalizacion/DOC SetUp/DOC SetUp/Portenta_H7_BlinkingLED/CM7/Middlewares/tensorflow/tensorflow/lite/micro/memory_planner"/>
-									<listOptionValue builtIn="false" value="C:/Users/jaene/Desktop/ModeloLocalizacion/DOC SetUp/DOC SetUp/Portenta_H7_BlinkingLED/CM7/Middlewares/tensorflow/tensorflow/lite/micro/kernels"/>
-									<listOptionValue builtIn="false" value="C:/Users/jaene/Desktop/ModeloLocalizacion/DOC SetUp/DOC SetUp/Portenta_H7_BlinkingLED/CM7/Middlewares/tensorflow/tensorflow/lite/kernels/internal/reference"/>
+									<listOptionValue builtIn="false" value="../../Drivers/CMSIS/Device/ST/STM32H7xx/Include"/>
 									<listOptionValue builtIn="false" value="C:/Users/jaene/STM32Cube/Repository/Packs/STMicroelectronics/X-CUBE-AI/10.2.0/Middlewares/tensorflow/third_party/flatbuffers/include"/>
 									<listOptionValue builtIn="false" value="C:/Users/jaene/STM32Cube/Repository/Packs/STMicroelectronics/X-CUBE-AI/10.2.0/Middlewares/tensorflow/third_party/gemmlowp"/>
 									<listOptionValue builtIn="false" value="C:/Users/jaene/STM32Cube/Repository/Packs/STMicroelectronics/X-CUBE-AI/10.2.0/Middlewares/tensorflow/third_party/cmsis_nn/Include"/>

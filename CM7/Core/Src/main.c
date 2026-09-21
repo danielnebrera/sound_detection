@@ -48,6 +48,20 @@ static bool s_audio_running = false;
 static DroneDetectionResult s_record_results[RECORD_MAX_OUTPUT_CHUNKS];
 static bool s_record_result_valid[RECORD_MAX_OUTPUT_CHUNKS];
 
+typedef struct
+{
+    uint32_t pi6_mode;
+    uint32_t pi6_pupd;
+    uint32_t pi6_af;
+
+    uint32_t pg10_mode;
+    uint32_t pg10_pupd;
+    uint32_t pg10_af;
+} SaiGpioDiag;
+
+static SaiGpioDiag s_sai_gpio_active_diag;
+static bool s_sai_gpio_active_diag_valid = false;
+
 static void uart_send(const char *text)
 {
     if (text == NULL)
@@ -61,6 +75,92 @@ static void uart_send(const char *text)
         (uint16_t)strlen(text),
         HAL_MAX_DELAY
     );
+}
+
+static void read_sai_gpio_diag(SaiGpioDiag *diag)
+{
+    if (diag == NULL)
+    {
+        return;
+    }
+
+    diag->pi6_mode =
+        (GPIOI->MODER >> (6U * 2U)) & 0x3U;
+
+    diag->pi6_pupd =
+        (GPIOI->PUPDR >> (6U * 2U)) & 0x3U;
+
+    diag->pi6_af =
+        (GPIOI->AFR[0] >> (6U * 4U)) & 0xFU;
+
+    diag->pg10_mode =
+        (GPIOG->MODER >> (10U * 2U)) & 0x3U;
+
+    diag->pg10_pupd =
+        (GPIOG->PUPDR >> (10U * 2U)) & 0x3U;
+
+    diag->pg10_af =
+        (GPIOG->AFR[1] >> ((10U - 8U) * 4U)) & 0xFU;
+}
+
+static void emit_sai_gpio_diag(
+    const char *tag,
+    const SaiGpioDiag *diag)
+{
+    char line[192];
+
+    if ((tag == NULL) || (diag == NULL))
+    {
+        return;
+    }
+
+    snprintf(
+        line,
+        sizeof(line),
+        "[SAI_GPIO_%s] "
+        "PI6 mode=%lu pupd=%lu af=%lu "
+        "PG10 mode=%lu pupd=%lu af=%lu\r\n",
+        tag,
+        (unsigned long)diag->pi6_mode,
+        (unsigned long)diag->pi6_pupd,
+        (unsigned long)diag->pi6_af,
+        (unsigned long)diag->pg10_mode,
+        (unsigned long)diag->pg10_pupd,
+        (unsigned long)diag->pg10_af
+    );
+
+    uart_send(line);
+}
+
+static void emit_raw_diag(void)
+{
+    char line[128];
+
+    uart_send(
+        "[RAW_DIAG_START] frames=512 source=dma_first_half\r\n"
+    );
+
+    for (uint32_t i = 0U; i < AUDIO_BUFFER_SIZE; i++)
+    {
+        const uint32_t source_index =
+            i * AUDIO_SLOTS_PER_FRAME;
+
+        snprintf(
+            line,
+            sizeof(line),
+            "[RAW_DIAG_DATA] i=%lu ae=%08lX ao=%08lX "
+            "be=%08lX bo=%08lX\r\n",
+            (unsigned long)i,
+            (unsigned long)dma_buf_a[source_index],
+            (unsigned long)dma_buf_a[source_index + 1U],
+            (unsigned long)dma_buf_b[source_index],
+            (unsigned long)dma_buf_b[source_index + 1U]
+        );
+
+        uart_send(line);
+    }
+
+    uart_send("[RAW_DIAG_END]\r\n");
 }
 
 static uint32_t cycles_to_microseconds(uint32_t cycles)
@@ -194,6 +294,9 @@ static bool start_audio_capture(void)
 
     s_audio_running = true;
     HAL_Delay(20U);
+
+    read_sai_gpio_diag(&s_sai_gpio_active_diag);
+    s_sai_gpio_active_diag_valid = true;
 
     return
         (hsai_BlockA2.State == HAL_SAI_STATE_BUSY_RX) &&
@@ -445,6 +548,13 @@ int main(void)
     MX_DMA_Init();
     MX_SAI2_Init();
 
+    {
+        SaiGpioDiag diag;
+        read_sai_gpio_diag(&diag);
+        emit_sai_gpio_diag("INIT", &diag);
+    }
+
+
     if (!configure_microphone_power())
     {
         stop_with_error("[PMIC_FAIL]\r\n");
@@ -525,6 +635,14 @@ int main(void)
         }
 
         __WFI();
+    }
+
+    if (s_sai_gpio_active_diag_valid)
+    {
+        emit_sai_gpio_diag(
+            "ACTIVE",
+            &s_sai_gpio_active_diag
+        );
     }
 
     const uint32_t recorded_chunks =
@@ -618,7 +736,19 @@ int main(void)
 
     while (1)
     {
-        HAL_Delay(1000U);
+        uint8_t command = 0U;
+
+        if (HAL_UART_Receive(
+                &huart1,
+                &command,
+                1U,
+                250U) == HAL_OK)
+        {
+            if (command == (uint8_t)'D')
+            {
+                emit_raw_diag();
+            }
+        }
     }
 }
 
