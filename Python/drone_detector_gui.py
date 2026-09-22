@@ -128,63 +128,88 @@ class AudioWorker(threading.Thread):
 
 
 # ── Pestaña 1: detección ──────────────────────────────────────
+# Lo único que hay que poder leer desde lejos es si hay dron o no. P y H son
+# el porqué, y viven en dos medidores discretos debajo del cartel.
+ESTADO_BANNER = {0: "SIN DRON", 1: "RASTREANDO",
+                 2: "DRON PROBABLE", 3: "DRON DETECTADO"}
+ESTADO_SUB = {0: "sin actividad", 1: "señal sospechosa, aún sin confirmar",
+              2: "alerta naranja — dron lejano confirmado",
+              3: "alerta roja"}
+
+
 def tab_deteccion(fig, cfg: DetectorConfig):
     from matplotlib.gridspec import GridSpec
-    from matplotlib.patches import Rectangle
+    from matplotlib.patches import FancyBboxPatch, Rectangle
 
-    gs = GridSpec(2, 1, figure=fig, height_ratios=[2.7, 1.3], hspace=0.45,
+    gs = GridSpec(2, 1, figure=fig, height_ratios=[2.4, 1.6], hspace=0.22,
                   left=0.07, right=0.97, top=0.95, bottom=0.10)
 
     ax = fig.add_subplot(gs[0])
     ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
 
-    txt_p   = ax.text(0.0, 0.92, "P = 0.00", va="center", ha="left",
-                      fontsize=30, fontweight="bold", color="#2ca02c")
-    txt_ema = ax.text(0.5, 0.92, "EMA 0.00", va="center", ha="center",
-                      fontsize=15, fontweight="bold", color=TEXTO)
-    txt_est = ax.text(1.0, 0.92, "SIN DRON", va="center", ha="right",
-                      fontsize=21, fontweight="bold", color="#2ca02c")
+    # -- Cartel de estado --
+    banner = FancyBboxPatch((0.0, 0.60), 1.0, 0.40,
+                            boxstyle="round,pad=0.002,rounding_size=0.018",
+                            facecolor="#2ca02c26", edgecolor="#2ca02c",
+                            linewidth=2.4, zorder=1)
+    ax.add_patch(banner)
+    txt_est = ax.text(0.5, 0.855, ESTADO_BANNER[0], va="center", ha="center",
+                      fontsize=46, fontweight="bold", color="#2ca02c", zorder=3)
+    txt_sub = ax.text(0.5, 0.685, ESTADO_SUB[0], va="center", ha="center",
+                      fontsize=12, color=APAGADO, zorder=3)
 
+    # -- Medidores discretos --
     def medidor(y, alto):
         ax.add_patch(Rectangle((0, y), 1.0, alto, facecolor=PANEL,
-                               edgecolor=BORDE, linewidth=1.0, zorder=1))
+                               edgecolor=BORDE, linewidth=0.8, zorder=1))
         r = Rectangle((0, y), 0.0, alto, facecolor="#2ca02c", edgecolor="none",
                       zorder=2)
         ax.add_patch(r)
         return r
 
-    MY, MH = 0.64, 0.14
+    manda = {"model": ("  ← decide la alerta", ""),
+             "harmonic": ("", "  ← decide la alerta"),
+             "both": ("  ← decide junto con H", "  ← decide junto con p")}[cfg.decision]
+
+    MY, MH = 0.42, 0.055
+    ax.text(0.0, MY + MH + 0.035, "modelo (red neuronal)" + manda[0], fontsize=8,
+            color=TEXTO if manda[0] else APAGADO, va="center", ha="left")
+    txt_p = ax.text(1.0, MY + MH + 0.035, "P 0.00", va="center", ha="right",
+                    fontsize=11, fontweight="bold", color="#2ca02c")
     barra_p = medidor(MY, MH)
     for valor, etiqueta in ((cfg.thresh_suspicion, "sospecha"),
                             (cfg.thresh_instant, "instantáneo"),
                             (cfg.thresh_trigger_fast, "disparo")):
-        ax.plot([valor, valor], [MY, MY + MH], color="#8b9099", lw=1.0,
+        ax.plot([valor, valor], [MY, MY + MH], color="#8b9099", lw=0.8,
                 ls=(0, (3, 3)), zorder=3)
-        ax.text(valor, MY - 0.045, f"{etiqueta} {valor:.2f}", ha="center",
-                va="top", fontsize=7.5, color="#8b9099", zorder=3)
-    marca_ema, = ax.plot([0, 0], [MY - 0.02, MY + MH + 0.02], color="#ffffff",
-                         lw=2.0, zorder=4)
+        ax.text(valor, MY - 0.012, f"{etiqueta} {valor:.2f}", ha="center",
+                va="top", fontsize=6.5, color="#70767d", zorder=3)
 
-    manda = {"model": ("  ← decide la alerta", ""),
-             "harmonic": ("", "  ← decide la alerta"),
-             "both": ("  ← decide junto con H", "  ← decide junto con p")}[cfg.decision]
-    ax.text(0.0, MY - 0.045, "modelo (red neuronal)" + manda[0], fontsize=8,
-            color=TEXTO if manda[0] else APAGADO, va="top", ha="left")
-
-    txt_h  = ax.text(0.0, 0.36, "H = 0.00", va="center", ha="left",
-                     fontsize=24, fontweight="bold", color="#2ca02c")
-    txt_hd = ax.text(1.0, 0.36, "", va="center", ha="right", fontsize=10.5,
-                     color="#9aa0a6")
-    M2Y, M2H = 0.10, 0.14
-    barra_h = medidor(M2Y, M2H)
-    ax.plot([H_UMBRAL, H_UMBRAL], [M2Y, M2Y + M2H], color="#8b9099", lw=1.0,
-            ls=(0, (3, 3)), zorder=3)
-    ax.text(H_UMBRAL, M2Y - 0.045, f"parecido a dron {H_UMBRAL:.2f}", ha="center",
-            va="top", fontsize=7.5, color="#8b9099", zorder=3)
-    ax.text(0.0, M2Y - 0.045,
+    M2Y, M2H = 0.21, 0.055
+    ax.text(0.0, M2Y + M2H + 0.035,
             "peine armónico — sin modelo, independiente del volumen" + manda[1],
-            fontsize=8, color=TEXTO if manda[1] else APAGADO, va="top", ha="left")
-    txt_info = ax.text(0.0, -0.06, "", va="top", ha="left", fontsize=10,
+            fontsize=8, color=TEXTO if manda[1] else APAGADO, va="center", ha="left")
+    txt_h = ax.text(1.0, M2Y + M2H + 0.035, "H 0.00", va="center", ha="right",
+                    fontsize=11, fontweight="bold", color="#2ca02c")
+    barra_h = medidor(M2Y, M2H)
+    ax.plot([H_UMBRAL, H_UMBRAL], [M2Y, M2Y + M2H], color="#8b9099", lw=0.8,
+            ls=(0, (3, 3)), zorder=3)
+    ax.text(H_UMBRAL, M2Y - 0.012, f"parecido a dron {H_UMBRAL:.2f}", ha="center",
+            va="top", fontsize=6.5, color="#70767d", zorder=3)
+
+    # La EMA solo se marca sobre la barra que realmente decide la alerta:
+    # ponerla sobre las dos sugeriría que las dos alimentan el umbral.
+    marcas_ema = []
+    if cfg.decision in ("model", "both"):
+        marcas_ema.append(ax.plot([0, 0], [MY - 0.008, MY + MH + 0.008],
+                                  color="#ffffff", lw=1.6, zorder=4)[0])
+    if cfg.decision in ("harmonic", "both"):
+        marcas_ema.append(ax.plot([0, 0], [M2Y - 0.008, M2Y + M2H + 0.008],
+                                  color="#ffffff", lw=1.6, zorder=4)[0])
+
+    txt_hd = ax.text(0.0, 0.105, "", va="center", ha="left", fontsize=8.5,
+                     color="#9aa0a6")
+    txt_info = ax.text(0.0, 0.02, "", va="center", ha="left", fontsize=8.5,
                        color="#9aa0a6")
 
     axw = fig.add_subplot(gs[1])
@@ -213,21 +238,27 @@ def tab_deteccion(fig, cfg: DetectorConfig):
         c_alerta = COLOR_ALERTA[alrt]
         c_p = color_para(p, cfg.thresh_trigger_fast)
 
+        txt_est.set_text(ESTADO_BANNER[alrt]); txt_est.set_color(c_alerta)
+        txt_sub.set_text(f"{ESTADO_SUB[alrt]}   ·   EMA {ema:.2f}"
+                         f"   ·   persistencia {snap['persistence']}/"
+                         f"{cfg.ticks_persistence}")
+        banner.set_edgecolor(c_alerta)
+        banner.set_facecolor(c_alerta + "26")
+        for m in marcas_ema:
+            m.set_xdata([ema, ema])
+
         barra_p.set_width(p); barra_p.set_facecolor(c_p)
-        txt_p.set_text(f"P = {p:.2f}"); txt_p.set_color(c_p)
-        txt_est.set_text(ALERT_TXT[alrt]); txt_est.set_color(c_alerta)
-        marca_ema.set_xdata([ema, ema])
-        txt_ema.set_text(f"EMA {ema:.2f}"); txt_ema.set_color(c_alerta)
+        txt_p.set_text(f"P {p:.2f}"); txt_p.set_color(c_p)
 
         harm = snap.get("harmonic")
         if harm is None:
             barra_h.set_width(0.0)
-            txt_h.set_text("H = —"); txt_h.set_color(APAGADO)
+            txt_h.set_text("H —"); txt_h.set_color(APAGADO)
             txt_hd.set_text("peine armónico desactivado")
         else:
             c_h = color_para(harm.score)
             barra_h.set_width(harm.score); barra_h.set_facecolor(c_h)
-            txt_h.set_text(f"H = {harm.score:.2f}"); txt_h.set_color(c_h)
+            txt_h.set_text(f"H {harm.score:.2f}"); txt_h.set_color(c_h)
             if harm.score < 0.15:
                 txt_hd.set_text("sin estructura armónica estable")
             else:
@@ -273,8 +304,8 @@ def tab_deteccion(fig, cfg: DetectorConfig):
 # ── Pestaña 2: espectro ───────────────────────────────────────
 def tab_espectro(fig, params, n_peaks, fmax):
     from matplotlib.gridspec import GridSpec
-    gs = GridSpec(2, 1, figure=fig, height_ratios=[1.0, 1.8], hspace=0.35,
-                  left=0.08, right=0.93, top=0.92, bottom=0.08)
+    gs = GridSpec(2, 1, figure=fig, height_ratios=[1.0, 1.8], hspace=0.45,
+                  left=0.08, right=0.93, top=0.90, bottom=0.09)
 
     n_bins = params.n_fft // 2 + 1
     freqs = np.linspace(0, SR / 2.0, n_bins)
@@ -387,8 +418,7 @@ def tab_mfcc(fig, params):
         im.set_clim(vmin=float(np.percentile(resto, 1)),
                     vmax=float(np.percentile(resto, 99)))
         txt.set_text(f"c0 (energía) medio {m[:, 0].mean():.1f}, fuera de escala   ·   "
-                     f"c1..c19 en [{resto.min():.0f}, {resto.max():.0f}]   ·   "
-                     f"las columnas 18 y 19 no llegan a la salida de la red")
+                     f"c1..c19 en [{resto.min():.0f}, {resto.max():.0f}]")
 
     return update
 
@@ -447,7 +477,7 @@ PASOS_WORKFLOW = [
     ("dct",     "9 · DCT-II ortho",     "→ 20 coeficientes",             "i", 6),
     ("modelo",  "10 · RED NEURONAL",    "Conv16→Conv32→D64→D1",          "i", 7),
     ("hstft",   "11 · STFT FINA",       "n_fft 8192 → 5.4 Hz/bin",       "d", 0),
-    ("fondo",   "12 · FONDO ESPECTRAL", "percentil 25 por bloques",      "d", 1),
+    ("fondo",   "12 · FONDO ESPEC.",   "percentil 25 por bloques",      "d", 1),
     ("peine",   "13 · BUSCAR f0",       "peine 60–400 Hz · mediana",     "d", 2),
     ("estab",   "14 · ESTABILIDAD",     "¿el f0 aguanta el segundo?",    "d", 3),
     ("h",       "15 · H",               "parecido con un dron",          "d", 4),
@@ -510,12 +540,14 @@ def tab_workflow(fig, cfg: DetectorConfig):
                               facecolor=PANEL, edgecolor=BORDE, linewidth=1.2,
                               zorder=2)
         ax.add_patch(caja)
-        ax.text(x + 0.010, y + ALTO - 0.020, titulo, fontsize=8.5,
+        # Tamaños ajustados para que el titulo y el valor no choquen cuando la
+        # ventana comparte pantalla con otros tres paneles.
+        ax.text(x + 0.010, y + ALTO - 0.020, titulo, fontsize=7,
                 fontweight="bold", color=TEXTO, va="center", zorder=4)
-        ax.text(x + 0.010, y + 0.020, sub, fontsize=7, color=APAGADO,
+        ax.text(x + 0.010, y + 0.020, sub, fontsize=6, color=APAGADO,
                 va="center", zorder=4)
         textos[clave] = ax.text(x + ANCHO - 0.008, y + ALTO - 0.020, "—",
-                                fontsize=9, fontweight="bold", color=APAGADO,
+                                fontsize=7.5, fontweight="bold", color=APAGADO,
                                 va="center", ha="right", zorder=4)
 
         # Fondo de la minigráfica + línea + punto en el valor actual
@@ -592,7 +624,7 @@ def tab_workflow(fig, cfg: DetectorConfig):
         raw = snap["raw_pcm"]
         pico_raw = float(np.abs(raw).max()) if raw.size else 0.0
         tasa = mic.capture_rate if mic else SR
-        poner("captura", f"{tasa} → {SR} Hz", pico_raw)
+        poner("captura", f"{tasa/1000:.1f} → {SR/1000:.1f} kHz", pico_raw)
         poner("hpf", f"{snap['dbfs_in']:+.1f} dBFS", snap["dbfs_in"])
 
         if cfg.agc:
@@ -627,7 +659,7 @@ def tab_workflow(fig, cfg: DetectorConfig):
             poner("fondo", f"máx {harm.residual_db.max():.0f} dB",
                   float(harm.residual_db.max()))
             f0 = f"{harm.f0_hz:.0f} Hz" if np.isfinite(harm.f0_hz) else "—"
-            poner("peine", f"f0 {f0} · {harm.n_harmonics} arm",
+            poner("peine", f"{f0} · {harm.n_harmonics}a",
                   float(harm.f0_hz) if np.isfinite(harm.f0_hz) else None)
             poner("estab", f"{harm.stability*100:.0f} %", float(harm.stability))
             poner("h", f"H = {harm.score:.2f}", float(harm.score),
@@ -649,63 +681,158 @@ def tab_workflow(fig, cfg: DetectorConfig):
     return update
 
 
-# ── Ventana principal ─────────────────────────────────────────
+# ── Monitores y marca ─────────────────────────────────────────
+def monitores() -> list[tuple[int, int, int, int]]:
+    """
+    Rectangulos (x, y, ancho, alto) de cada monitor, de izquierda a derecha.
+
+    Se pregunta a Windows en vez de asumir que la segunda pantalla esta justo a
+    la derecha de la primera: puede estar a la izquierda, encima, o tener otra
+    resolucion, y entonces la ventana aparecia a medias entre las dos.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        rects: list[tuple[int, int, int, int]] = []
+
+        proto = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
+                                   ctypes.POINTER(wintypes.RECT), ctypes.c_ssize_t)
+
+        def enumerar(_hmon, _hdc, lprect, _datos):
+            r = lprect.contents
+            rects.append((r.left, r.top, r.right - r.left, r.bottom - r.top))
+            return 1
+
+        ctypes.windll.user32.EnumDisplayMonitors(None, None, proto(enumerar), 0)
+        if rects:
+            return sorted(rects, key=lambda r: (r[0], r[1]))
+    except Exception:
+        pass
+    return []
+
+
+def cargar_logo():
+    """Logo de Khamex, blanco sobre transparente. None si no esta."""
+    ruta = Path(__file__).resolve().parent / "assets" / "logo_khamex.png"
+    if not ruta.exists():
+        return None
+    try:
+        import matplotlib.image as mpimg
+        return mpimg.imread(str(ruta))
+    except Exception:
+        return None
+
+
+def cabecera(subfig, titulo: str, subtitulo: str, logo) -> None:
+    """Franja superior: titulo a la izquierda, logo a la derecha."""
+    ax = subfig.add_subplot(111)
+    ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
+    subfig.subplots_adjust(left=0.012, right=0.988, top=1.0, bottom=0.0)
+    ax.text(0.0, 0.62, titulo, fontsize=13, fontweight="bold", color=TEXTO,
+            va="center", ha="left")
+    ax.text(0.0, 0.22, subtitulo, fontsize=8.5, color=APAGADO,
+            va="center", ha="left")
+    if logo is not None:
+        alto = 0.62
+        ancho = alto * (logo.shape[1] / logo.shape[0]) * 0.115
+        eje = subfig.add_axes([1.0 - ancho - 0.012, 0.19, ancho, alto])
+        eje.imshow(logo, interpolation="antialiased")
+        eje.axis("off")
+
+
+# ── Ventanas ──────────────────────────────────────────────────
+def _montar_ventana(master, titulo, subtitulo, constructores, logo, rect):
+    """
+    Crea una ventana con TODOS sus paneles a la vez (sin pestañas), repartidos en
+    rejilla mediante subfiguras: cada panel conserva su propio codigo de dibujo,
+    solo cambia el trozo de figura sobre el que pinta.
+    """
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.figure import Figure
+
+    master.title(titulo)
+    master.configure(bg=FONDO)
+    if rect:
+        x, y, w, h = rect
+        master.geometry(f"{w}x{h}+{x}+{y}")
+    else:
+        master.geometry("1600x950")
+
+    fig = Figure(figsize=(16, 9), facecolor=FONDO)
+    cab, cuerpo = fig.subfigures(2, 1, height_ratios=[0.055, 1.0])
+    cab.set_facecolor(FONDO)
+    cuerpo.set_facecolor(FONDO)
+    cabecera(cab, titulo, subtitulo, logo)
+
+    n = len(constructores)
+    if n == 1:
+        trozos = [cuerpo]
+    else:
+        filas = 2 if n > 2 else 1
+        cols = (n + filas - 1) // filas
+        rejilla = cuerpo.subfigures(filas, cols, wspace=0.02, hspace=0.04)
+        trozos = list(np.ravel(rejilla))[:n]
+        for t in np.ravel(rejilla):
+            t.set_facecolor(FONDO)
+
+    updates = [c(t) for c, t in zip(constructores, trozos)]
+
+    canvas = FigureCanvasTkAgg(fig, master=master)
+    canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+    barra = tk.Label(master, text="esperando audio...", bg=FONDO, fg=APAGADO,
+                     anchor="w", font=("Segoe UI", 9))
+    barra.pack(fill=tk.X, padx=10, pady=(0, 3))
+    return {"canvas": canvas, "updates": updates, "barra": barra}
+
+
 def run_gui(device, n_peaks: int, fmax_display: float, mfcc_params,
             detector_cfg: DetectorConfig, refresh_ms: int = 500,
             hop_s: float = 0.5, max_lag_s: float = 1.0,
-            con_workflow: bool = True) -> None:
+            con_workflow: bool = True, pantallas: tuple[int, int] = (0, 1),
+            una_ventana: bool = False) -> None:
     import matplotlib
     import matplotlib.style
     matplotlib.use("TkAgg")
     matplotlib.style.use("dark_background")
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    from matplotlib.figure import Figure
 
     detector = DroneDetector(config=detector_cfg, mfcc_params=mfcc_params)
     worker   = AudioWorker(detector, device, hop_s=hop_s, max_lag_s=max_lag_s)
     worker.start()
 
-    root = tk.Tk()
-    root.title("Detector de drones — Portenta H7 (Windows)")
-    root.configure(bg=FONDO)
-    root.geometry("1280x900")
+    logo = cargar_logo()
+    pant = monitores()
+    def rect_de(i):
+        return pant[i] if 0 <= i < len(pant) else None
 
+    root = tk.Tk()
     estilo = ttk.Style()
     try:
         estilo.theme_use("clam")
     except tk.TclError:
         pass
-    estilo.configure("TNotebook", background=FONDO, borderwidth=0)
-    estilo.configure("TNotebook.Tab", background=PANEL, foreground=APAGADO,
-                     padding=(16, 7), borderwidth=0)
-    estilo.map("TNotebook.Tab", background=[("selected", "#24262a")],
-               foreground=[("selected", TEXTO)])
     estilo.configure("TFrame", background=FONDO)
 
-    nb = ttk.Notebook(root)
-    nb.pack(fill=tk.BOTH, expand=True)
+    # -- Ventana 1: lo que se lee desde lejos --
+    ventanas = [_montar_ventana(
+        root, "KHAMEX · Detección de drones",
+        f"modelo {Path(detector_cfg.model_path).name}  ·  decide "
+        f"{detector_cfg.decision}  ·  ventana 1 s cada {hop_s:g} s",
+        [lambda f: tab_deteccion(f, detector_cfg)], logo, rect_de(pantallas[0]))]
 
-    constructores = [
-        ("Detección", lambda f: tab_deteccion(f, detector_cfg)),
-        ("Espectro",  lambda f: tab_espectro(f, mfcc_params, n_peaks, fmax_display)),
-        ("MFCC",      lambda f: tab_mfcc(f, mfcc_params)),
-        ("Armónicos", lambda f: tab_armonicos(f)),
-    ]
-    if con_workflow:
-        constructores.append(("Workflow", lambda f: tab_workflow(f, detector_cfg)))
-
-    pestanas = []
-    for nombre, constructor in constructores:
-        marco = ttk.Frame(nb)
-        nb.add(marco, text=nombre)
-        fig = Figure(figsize=(12.6, 8.4), facecolor=FONDO)
-        canvas = FigureCanvasTkAgg(fig, master=marco)
-        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        pestanas.append({"canvas": canvas, "update": constructor(fig)})
-
-    barra = tk.Label(root, text="esperando audio...", bg=FONDO, fg=APAGADO,
-                     anchor="w", font=("Segoe UI", 9))
-    barra.pack(fill=tk.X, padx=10, pady=(0, 4))
+    # -- Ventana 2: el analisis, todo simultaneo --
+    if not una_ventana:
+        segunda = [
+            lambda f: tab_espectro(f, mfcc_params, n_peaks, fmax_display),
+            lambda f: tab_mfcc(f, mfcc_params),
+            lambda f: tab_armonicos(f),
+        ]
+        if con_workflow:
+            segunda.append(lambda f: tab_workflow(f, detector_cfg))
+        top = tk.Toplevel(root)
+        ventanas.append(_montar_ventana(
+            top, "KHAMEX · Análisis",
+            "espectro · MFCC · armónicos" + ("  ·  workflow" if con_workflow else ""),
+            segunda, logo, rect_de(pantallas[1])))
 
     ocupado = {"v": False}
 
@@ -713,34 +840,29 @@ def run_gui(device, n_peaks: int, fmax_display: float, mfcc_params,
         if not ocupado["v"]:
             ocupado["v"] = True
             try:
-                if worker.error:
-                    barra.configure(text=f"[ERROR] {worker.error}", fg="#ff3b3b")
                 snap = worker.snapshot()
-                if snap is not None:
-                    # Solo se repinta la pestaña visible. Las demas se actualizan
-                    # cuando el usuario las trae al frente.
-                    p = pestanas[nb.index(nb.select())]
-                    p["update"](snap, worker)
-                    p["canvas"].draw_idle()
+                if worker.error:
+                    for v in ventanas:
+                        v["barra"].configure(text=f"[ERROR] {worker.error}",
+                                             fg="#ff3b3b")
+                elif snap is not None:
+                    t0 = time.perf_counter()
+                    for v in ventanas:
+                        for upd in v["updates"]:
+                            upd(snap, worker)
+                        v["canvas"].draw_idle()
+                    ms = (time.perf_counter() - t0) * 1000
                     mic = worker._mic
-                    barra.configure(
-                        text=f"ventana 1 s cada {hop_s:g} s   ·   "
-                             f"análisis {snap['latency_ms']:.0f} ms   ·   "
-                             f"descartado {mic.dropped_blocks if mic else 0} bloques / "
-                             f"{mic.skipped_windows if mic else 0} ventanas",
-                        fg=APAGADO)
+                    txt = (f"ventana 1 s cada {hop_s:g} s   ·   "
+                           f"análisis {snap['latency_ms']:.0f} ms   ·   "
+                           f"pintado {ms:.0f} ms   ·   "
+                           f"descartado {mic.dropped_blocks if mic else 0} bloques / "
+                           f"{mic.skipped_windows if mic else 0} ventanas")
+                    for v in ventanas:
+                        v["barra"].configure(text=txt, fg=APAGADO)
             finally:
                 ocupado["v"] = False
         root.after(refresh_ms, tick)
-
-    def al_cambiar_pestana(_evt):
-        snap = worker.snapshot()
-        if snap is not None:
-            p = pestanas[nb.index(nb.select())]
-            p["update"](snap, worker)
-            p["canvas"].draw_idle()
-
-    nb.bind("<<NotebookTabChanged>>", al_cambiar_pestana)
 
     def cerrar():
         worker.stop()
@@ -748,6 +870,9 @@ def run_gui(device, n_peaks: int, fmax_display: float, mfcc_params,
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", cerrar)
+    if len(ventanas) > 1:
+        ventanas[1]["canvas"].get_tk_widget().winfo_toplevel().protocol(
+            "WM_DELETE_WINDOW", cerrar)
     root.after(refresh_ms, tick)
     try:
         root.mainloop()
@@ -767,7 +892,13 @@ def main() -> None:
     parser.add_argument("--fmax", type=float, default=8000.0,
                         help="Frecuencia máxima mostrada en el espectrograma (Hz)")
     parser.add_argument("--no-workflow", action="store_true",
-                        help="No añadir la pestaña con el diagrama del algoritmo")
+                        help="No dibujar el panel con el diagrama del algoritmo")
+    parser.add_argument("--pantallas", type=int, nargs=2, default=[0, 1],
+                        metavar=("N1", "N2"),
+                        help="Monitores donde va cada ventana, contados de "
+                             "izquierda a derecha empezando en 0 (def 0 1)")
+    parser.add_argument("--una-ventana", action="store_true",
+                        help="Solo la ventana de detección, sin la de análisis")
     parser.add_argument("--max-lag", type=float, default=1.0,
                         help="Retraso máximo tolerado en segundos. Si el análisis se "
                              "retrasa más, se descarta audio viejo (def 1.0)")
@@ -777,9 +908,8 @@ def main() -> None:
     parser.add_argument("--refresh", type=int, default=0,
                         help="Milisegundos entre refrescos. 0 = al ritmo de --hop")
     parser.add_argument("--decide", choices=("harmonic", "model", "both"),
-                        default="model",
-                        help="Qué puntuación dispara las alertas (def model: "
-                             "AUC 1.000 frente a 0.777 de la H)")
+                        default="harmonic",
+                        help="Qué puntuación dispara las alertas (def harmonic)")
     parser.add_argument("--no-harmonic", action="store_true",
                         help="No calcular H (ahorra ~40 ms por segundo)")
     parser.add_argument("--agc", action="store_true",
@@ -795,6 +925,9 @@ def main() -> None:
     parser.add_argument("--mode", choices=sorted(PRESETS), default="training",
                         help="Pipeline MFCC. training (def) = copia exacta del "
                              "script de entrenamiento")
+    parser.add_argument("--model", default=None, metavar="TFLITE",
+                        help="Modelo .tflite a usar. Por defecto "
+                             "drone_mfcc_model.tflite. Relativa a Python/ o absoluta")
     args = parser.parse_args()
 
     if args.list_devices:
@@ -802,17 +935,32 @@ def main() -> None:
         return
 
     params = PRESETS[args.mode]
+    extra = {}
+    if args.model:
+        ruta = Path(args.model)
+        if not ruta.is_absolute():
+            ruta = Path(__file__).resolve().parent / ruta
+        if not ruta.exists():
+            raise SystemExit(f"No existe el modelo {ruta}")
+        extra["model_path"] = str(ruta)
     cfg = DetectorConfig(mic_gain=args.gain, silence_db=args.gate, agc=args.agc,
                          agc_target_floor_dbfs=args.agc_floor,
                          gate_over_floor_db=args.gate_over_floor,
-                         harmonic=not args.no_harmonic, decision=args.decide)
+                         harmonic=not args.no_harmonic, decision=args.decide, **extra)
     refresco = args.refresh or int(round(args.hop * 1000))
+    print(f"[MODEL] {Path(cfg.model_path).name}")
     print(f"[MODE] MFCC {args.mode}: n_fft={params.n_fft} n_mels={params.n_mels} "
           f"n_mfcc={params.n_mfcc} ref_max={params.ref_max}")
     print(f"[CFG]  alertas decididas por: {cfg.decision}")
     print(f"[CFG]  ventana 1 s cada {args.hop:g} s  ·  refresco {refresco} ms")
+    n_pant = len(monitores())
+    print(f"[PANT]  {n_pant} monitor(es) detectado(s); ventanas en {args.pantallas}")
+    if n_pant < 2 and not args.una_ventana:
+        print("[PANT]  solo hay una pantalla: las dos ventanas se abriran "
+              "superpuestas en ella")
     run_gui(args.device, args.peaks, args.fmax, params, cfg, refresco, args.hop,
-            args.max_lag, not args.no_workflow)
+            args.max_lag, not args.no_workflow, tuple(args.pantallas),
+            args.una_ventana)
 
 
 if __name__ == "__main__":

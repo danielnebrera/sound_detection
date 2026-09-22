@@ -89,6 +89,18 @@ def print_result(res: DetectionResult, elapsed_ms: float, prefix: str = "",
     print(line, flush=True)
 
 
+def resolve_model(ruta: str | None) -> dict:
+    """Ruta del .tflite: relativa a Python/ o absoluta. Vacio = la de por defecto."""
+    if not ruta:
+        return {}
+    p = Path(ruta)
+    if not p.is_absolute():
+        p = Path(__file__).resolve().parent / p
+    if not p.exists():
+        raise SystemExit(f"No existe el modelo {p}")
+    return {"model_path": str(p)}
+
+
 def build_detector(args) -> DroneDetector:
     agc = getattr(args, "agc", False)
     cfg = DetectorConfig(
@@ -97,9 +109,11 @@ def build_detector(args) -> DroneDetector:
         gate_over_floor_db=getattr(args, "gate_over_floor", 6.0),
         harmonic=not getattr(args, "no_harmonic", False),
         decision=getattr(args, "decide", "harmonic"),
+        **resolve_model(getattr(args, "model", None)),
     )
     det = DroneDetector(config=cfg, mfcc_params=PRESETS[args.mode])
     p = PRESETS[args.mode]
+    print(f"[CFG] modelo: {Path(cfg.model_path).name}")
     print(f"[CFG] pipeline={args.mode} (n_fft={p.n_fft} n_mels={p.n_mels} "
           f"n_mfcc={p.n_mfcc} ref_max={p.ref_max})")
     if cfg.harmonic:
@@ -388,6 +402,9 @@ def add_common(p, with_mode=True):
     p.add_argument("--no-harmonic", action="store_true",
                    help="No calcular la puntuación de peine armónico (ahorra ~40 ms "
                         "por segundo de audio)")
+    p.add_argument("--model", default=None, metavar="TFLITE",
+                   help="Modelo .tflite a usar. Por defecto drone_mfcc_model.tflite. "
+                        "Ruta relativa a la carpeta Python/ o absoluta")
     if with_mode:
         p.add_argument("--mode", choices=sorted(PRESETS), default="training",
                        help="Pipeline MFCC. training (def) = copia exacta del script "
