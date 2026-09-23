@@ -375,9 +375,8 @@
 					</fileInfo>
 					<sourceEntries>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Common"/>
-						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Core"/>
+						<entry excluding="Src/uart_driver.c|Src/portenta_sdram.c|Src/model_runner_stm32.cpp|Src/mfcc_stm32.c|Src/i2c.c|Src/gpio_bus_capture.c|Src/flash_logger.c|Src/fdcan.c|Src/drone_detection.c|Src/debug_log_stm32.c|Src/can_sender.c|Src/audio_recorder.c|Src/arm_rfft_fast_init_f32.c|Src/arm_rfft_fast_f32.c|Src/arm_const_structs.c|Src/arm_common_tables.c|Src/arm_cfft_radix8_f32.c|Src/arm_cfft_init_f32.c|Src/arm_cfft_f32.c|Src/arm_bitreversal2.S|Components" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Core"/>
 						<entry excluding="CMSIS_DSP_Transform/arm_bitreversal2.S|CMSIS_DSP_Transform/arm_cfft_f64.c|CMSIS_DSP_Transform/arm_cfft_init_f16.c|CMSIS_DSP_Transform/arm_cfft_f16.c|CMSIS_DSP_Transform/arm_bitreversal2.c|CMSIS_DSP_Transform/arm_bitreversal_f16.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Drivers"/>
-						<entry excluding="tensorflow/tensorflow/lite/kernels/padding.h|tensorflow/tensorflow/lite/kernels/op_macros.h|tensorflow/tensorflow/lite/kernels/kernel_util.h" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Middlewares"/>
 						<entry excluding="debug_log_imp.cc|app_x-cube-ai.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="X-CUBE-AI/App"/>
 					</sourceEntries>
 				</configuration>
