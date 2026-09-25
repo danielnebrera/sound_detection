@@ -137,9 +137,7 @@ BCLK != LRCL
 
 Estas señales no deben intercambiarse.
 
-Durante la etapa anterior se descubrió que una conexión incorrecta entre BCLK y LRCL provocaba que los micrófonos no generaran una salida DOUT válida.
-
-La conexión correcta y actualmente validada es:
+La conexión correcta es:
 
 ```text
 PI5 -> BCLK
@@ -169,31 +167,17 @@ SEL = VDD
 
 En `BasicSetUpMicsPairs` se aprovecha esta característica para conectar dos micrófonos a la misma línea DOUT.
 
-Ejemplo utilizado durante las pruebas principales:
+Cuando ambos SEL funcionan correctamente:
 
 ```text
-MIC5
-SEL = GND
+MIC A SEL=GND
 -> SLOT0
 
-MIC6
-SEL = VDD
+MIC B SEL=VDD
 -> SLOT1
 ```
 
-También se realizó la configuración inversa:
-
-```text
-MIC5
-SEL = VDD
--> SLOT1
-
-MIC6
-SEL = GND
--> SLOT0
-```
-
-Ambas configuraciones funcionaron correctamente.
+Cada micrófono utiliza una mitad diferente del frame I2S.
 
 ---
 
@@ -222,13 +206,13 @@ HAL_SAI_InitProtocol(
 );
 ```
 
-Los dos slots son recibidos de forma intercalada mediante la misma entrada:
+Los dos slots son recibidos mediante la misma entrada:
 
 ```text
 PI6 / SAI2_SD_A
 ```
 
-Conceptualmente, DMA recibe:
+Conceptualmente:
 
 ```text
 word 0 -> SLOT0
@@ -240,7 +224,7 @@ word 3 -> SLOT1
 
 ---
 
-# Clock I2S
+# Frecuencias I2S
 
 La frecuencia de muestreo es:
 
@@ -254,13 +238,13 @@ Cada frame contiene:
 2 slots
 ```
 
-con:
+con aproximadamente:
 
 ```text
 32 BCLK por slot
 ```
 
-por tanto:
+por lo tanto:
 
 ```text
 64 BCLK por frame
@@ -269,12 +253,12 @@ por tanto:
 La frecuencia aproximada de BCLK es:
 
 ```text
-44100 × 64
+44100 x 64
 =
 2.8224 MHz
 ```
 
-Los valores observados durante las pruebas son coherentes con:
+Valores esperados:
 
 ```text
 LRCL / WS ≈ 44.1 kHz
@@ -286,7 +270,7 @@ BCLK      ≈ 2.82 MHz
 
 # DMA
 
-SAI2A continúa utilizando DMA circular.
+SAI2A utiliza DMA circular.
 
 Configuración:
 
@@ -300,27 +284,25 @@ Mode             : Circular
 Priority         : Very High
 ```
 
-El buffer se mantiene en RAM D2:
+El buffer se encuentra en RAM D2:
 
 ```c
 __attribute__((section(".RAM_D2_bss"), aligned(32)))
 ```
 
-Durante las pruebas se confirmó que:
+Durante las pruebas se confirmó:
 
 ```text
 cpu_addr == dma_m0ar
 ```
 
-por lo que DMA escribe exactamente en el buffer posteriormente procesado por CPU.
+por lo que DMA escribe en el mismo buffer posteriormente procesado por CPU.
 
 ---
 
 # Firmware utilizado
 
-La primera etapa de `BasicSetUpMicsPairs` utiliza prácticamente el mismo firmware validado en `BasicSetUpMics`.
-
-Versión de diagnóstico:
+La fase actual utiliza el firmware diagnóstico:
 
 ```text
 BasicSetupMics P0.2c
@@ -329,19 +311,19 @@ PI6 GPIO-IDR
 DMA diagnostic
 ```
 
-Aunque algunos mensajes UART todavía contienen textos heredados como:
+Algunos mensajes UART todavía contienen textos heredados de la versión de un solo micrófono:
 
 ```text
 single-mic
 ```
 
-o:
+y:
 
 ```text
 Micros fisicos : 1
 ```
 
-estos textos no representan una limitación funcional.
+Estos textos no representan una limitación funcional.
 
 El firmware recibe actualmente:
 
@@ -353,27 +335,15 @@ SLOT1
 
 simultáneamente.
 
-Las pruebas realizadas en este proyecto demostraron que ambos slots pueden contener audio proveniente de dos micrófonos físicos distintos conectados sobre el mismo DOUT.
-
 ---
 
-# Cómo compilar el proyecto
+# Cómo compilar
 
 ## 1. Abrir STM32CubeIDE
 
 Abrir el workspace utilizado durante el desarrollo.
 
-Dentro del workspace se encuentran distintas versiones del proyecto.
-
-Se recomienda mantener cerrados los proyectos de referencia:
-
-```text
-v2.1.7 original
-
-BasicSetUpMics
-```
-
-y mantener abierto únicamente:
+El proyecto correspondiente a esta fase es:
 
 ```text
 BasicSetUpMicsPairs
@@ -381,40 +351,40 @@ BasicSetUpMicsPairs_CM7
 BasicSetUpMicsPairs_CM4
 ```
 
-El desarrollo actual utiliza únicamente CM7.
+Actualmente se utiliza únicamente:
+
+```text
+CM7
+```
 
 ---
 
-## 2. Seleccionar el proyecto CM7
+## 2. Seleccionar CM7
 
-El proyecto que debe compilarse es:
+Seleccionar:
 
 ```text
 BasicSetUpMicsPairs_CM7
 ```
 
-No es necesario modificar CM4 durante esta etapa.
-
 ---
 
-## 3. Realizar Build
+## 3. Hacer Build
 
 En STM32CubeIDE:
 
 ```text
-Right Click sobre BasicSetUpMicsPairs_CM7
+Right Click
 -> Build Project
 ```
 
-o utilizar el botón de Build del IDE.
-
-El enlace debe utilizar el linker script perteneciente al propio proyecto:
+El linker debe utilizar:
 
 ```text
 BasicSetUpMicsPairs\CM7\STM32H747XIHX_FLASH.ld
 ```
 
-Una compilación correcta genera:
+El proceso genera:
 
 ```text
 BasicSetUpMicsPairs_CM7.elf
@@ -424,9 +394,9 @@ BasicSetUpMicsPairs_CM7.list
 
 ---
 
-# Warnings conocidos durante Build
+# Warnings conocidos
 
-STM32CubeIDE actualmente muestra mensajes relacionados con `newlib-nano`:
+STM32CubeIDE puede mostrar warnings relacionados con `newlib-nano`:
 
 ```text
 _close
@@ -439,76 +409,42 @@ _read
 _write
 ```
 
-Ejemplo:
-
-```text
-warning: _write is not implemented and will always fail
-```
-
-Estos mensajes ya estaban presentes en `BasicSetUpMics`.
-
-Aunque CubeIDE pueda mostrar:
-
-```text
-Build Failed. 8 errors, 8 warnings
-```
-
-el firmware sí genera correctamente:
+Aunque CubeIDE pueda mostrar mensajes de error en el panel Problems, el firmware genera correctamente:
 
 ```text
 BasicSetUpMicsPairs_CM7.elf
 ```
 
-y posteriormente ejecuta:
-
-```text
-arm-none-eabi-size
-arm-none-eabi-objdump
-```
-
-Por tanto, durante esta fase no se están tratando estos mensajes como un fallo funcional del firmware.
-
-No se recomienda modificar el proyecto únicamente para eliminar estos warnings mientras el ELF se genere correctamente.
+Estos mensajes no se consideran actualmente un fallo funcional del proyecto.
 
 ---
 
 # Cómo flashear
 
-Después de compilar:
+Después del Build:
 
-1. Conectar la Portenta H7 al PC.
-2. Verificar que `BasicSetUpMicsPairs_CM7` es el proyecto activo.
-3. Utilizar la configuración habitual de STM32CubeIDE para programar CM7.
-4. Flashear el archivo:
+1. conectar la Portenta H7;
+2. seleccionar `BasicSetUpMicsPairs_CM7`;
+3. utilizar la configuración habitual de programación;
+4. flashear el ELF generado;
+5. reiniciar la placa si es necesario;
+6. mantener la Portenta conectada por USB.
 
-```text
-BasicSetUpMicsPairs_CM7.elf
-```
-
-5. Reiniciar la placa si es necesario.
-6. Mantener la Portenta conectada por USB para la comunicación UART.
-
-La UART utilizada por los scripts trabaja a:
+UART:
 
 ```text
 1,000,000 baud
 ```
 
-En las pruebas realizadas:
+Durante estas pruebas se utilizó:
 
 ```text
 COM6
 ```
 
-fue el puerto utilizado.
-
-El número de COM puede cambiar según el equipo.
-
 ---
 
 # Secuencia correcta de ejecución
-
-## Paso 1 - Apagar el montaje antes de modificar cables
 
 Antes de modificar:
 
@@ -521,48 +457,17 @@ LRCL
 GND
 ```
 
-apagar la alimentación del montaje.
+apagar completamente la alimentación.
 
----
+Después:
 
-## Paso 2 - Revisar conexión del par
-
-Ejemplo validado:
-
-```text
-MIC5
-SEL = GND
-
-MIC6
-SEL = VDD
-```
-
-Ambos comparten:
-
-```text
-BCLK
-LRCL
-DOUT
-3.3V
-GND
-```
-
-La línea DOUT común termina en:
-
-```text
-PI6
-```
-
----
-
-## Paso 3 - Encender y conectar la Portenta
-
-Después de revisar físicamente el montaje:
-
-1. alimentar los micrófonos;
-2. conectar la Portenta;
-3. verificar que aparece el puerto UART;
-4. ejecutar el script de captura.
+1. verificar conexiones;
+2. conectar un micrófono con SEL=GND;
+3. conectar el otro con SEL=VDD;
+4. verificar DOUT común;
+5. alimentar;
+6. verificar UART;
+7. ejecutar la captura.
 
 ---
 
@@ -588,8 +493,8 @@ El script:
 4. espera la captura;
 5. recibe SLOT0;
 6. recibe SLOT1;
-7. genera un JSON para cada slot;
-8. genera metadata de la sesión.
+7. genera JSON;
+8. genera metadata.
 
 ---
 
@@ -601,21 +506,17 @@ Después de recibir `R`, el STM32 mantiene aproximadamente:
 3000 ms
 ```
 
-de clocks activos antes de almacenar el segundo útil.
+de clocks activos antes del segundo útil.
 
-Por esta razón, cuando se utiliza un dron o tono continuo para las pruebas:
+Por esta razón se utilizó una fuente continua de sonido.
 
-1. iniciar el sonido antes de lanzar la captura;
-2. mantenerlo durante al menos 5 o 6 segundos;
-3. no utilizar únicamente una palmada corta.
-
-La captura almacenada tiene una duración exacta aproximada de:
+La captura almacena aproximadamente:
 
 ```text
 1 segundo
 ```
 
-y contiene:
+con:
 
 ```text
 44100 muestras por slot
@@ -623,39 +524,9 @@ y contiene:
 
 ---
 
-# Salida esperada del STM32
+# Archivos generados
 
-Durante una captura correcta con dos micrófonos se espera:
-
-```text
-[GPIO_IDR]
-```
-
-con actividad sobre PI6.
-
-Y posteriormente:
-
-```text
-[CAPTURE_DONE]
-```
-
-con:
-
-```text
-raw_nz0 ≈ 44100
-raw_nz1 ≈ 44100
-
-pcm_nz0 ≈ 44100
-pcm_nz1 ≈ 44100
-```
-
-Esto indica que ambos slots contienen datos.
-
----
-
-# Archivos JSON generados
-
-Ejemplo para la sesión 1034:
+Ejemplo:
 
 ```text
 json_test/sound/sound_s1034_ord1_slot0.json
@@ -669,65 +540,11 @@ Cada archivo contiene:
 44100 muestras
 ```
 
-normalizadas.
-
 ---
 
-# Medición de RMS y dBFS
+# Conversión a WAV
 
-Para analizar simultáneamente ambos slots se puede utilizar:
-
-```powershell
-python -c "import json,math; files=[r'json_test\sound\sound_s1034_ord1_slot0.json',r'json_test\sound\sound_s1034_ord1_slot1.json']; [(lambda p,x: print(p,'samples=',len(x),'min=',min(x),'max=',max(x),'peak=',max(abs(v) for v in x),'rms=',(r:=math.sqrt(sum(v*v for v in x)/len(x))),'rms_dbfs=',20*math.log10(r) if r>0 else '-inf'))(p,json.load(open(p))) for p in files]"
-```
-
-Esto imprime:
-
-```text
-samples
-min
-max
-peak
-rms
-rms_dbfs
-```
-
-para cada slot.
-
----
-
-# Comparación entre SLOT0 y SLOT1
-
-Para comprobar que ambos slots no contienen una copia digital del mismo audio se utilizó:
-
-```powershell
-python -c "import json,math; a=json.load(open(r'json_test\sound\sound_s1034_ord1_slot0.json')); b=json.load(open(r'json_test\sound\sound_s1034_ord1_slot1.json')); n=len(a); ma=sum(a)/n; mb=sum(b)/n; num=sum((x-ma)*(y-mb) for x,y in zip(a,b)); da=math.sqrt(sum((x-ma)**2 for x in a)); db=math.sqrt(sum((y-mb)**2 for y in b)); corr=num/(da*db) if da and db else 0; equal=sum(x==y for x,y in zip(a,b)); diff=math.sqrt(sum((x-y)**2 for x,y in zip(a,b))/n); print('samples=',n); print('exact_equal=',equal); print('equal_pct=',100*equal/n); print('correlation=',corr); print('rms_difference=',diff)"
-```
-
-Los campos utilizados son:
-
-```text
-exact_equal
-equal_pct
-correlation
-rms_difference
-```
-
-Si ambos canales fueran una copia digital directa se esperaría aproximadamente:
-
-```text
-equal_pct ≈ 100 %
-correlation ≈ 1
-rms_difference ≈ 0
-```
-
-Esto no ocurrió durante las pruebas.
-
----
-
-# Conversión JSON a WAV
-
-Después de generar los JSON se utiliza:
+Se utiliza:
 
 ```text
 json_to_wav_basico.py
@@ -739,32 +556,17 @@ Ejemplo:
 python json_to_wav_basico.py --session 1034
 ```
 
-El script genera:
-
-```text
-slot0 WAV
-slot1 WAV
-```
-
-permitiendo escuchar ambos canales de forma independiente.
-
-La salida se almacena en:
-
-```text
-wavs/session_1034/
-```
-
-Ambos WAV fueron comprobados auditivamente durante las pruebas de funcionamiento.
+La comprobación auditiva de los WAV forma parte de la validación.
 
 ---
 
-# Captura Hantek LRCL + DOUT
+# Medición Hantek LRCL + DOUT
 
-La medición de referencia utilizada para documentar el bus compartido es:
+La captura de referencia se encuentra en:
 
 ![LRCL y DOUT compartido](./CH1LRCL-CH2DOUT.png)
 
-Configuración utilizada:
+Configuración:
 
 ```text
 CH1 -> LRCL / WS común
@@ -794,7 +596,7 @@ Trigger Level ≈ 1.6 V
 
 ---
 
-# Interpretación de LRCL
+# Interpretación sencilla de la captura
 
 La señal amarilla:
 
@@ -802,44 +604,21 @@ La señal amarilla:
 CH1
 ```
 
-corresponde a:
+es:
 
 ```text
 LRCL / WS
 ```
 
-Se observa una señal periódica aproximadamente cuadrada.
-
-El STM32 registró:
+LRCL funciona como una señal que divide el tiempo en dos turnos:
 
 ```text
-PI7_trans ≈ 8801
+SLOT0
+SLOT1
+SLOT0
+SLOT1
+...
 ```
-
-durante:
-
-```text
-100 ms
-```
-
-Esto corresponde aproximadamente a:
-
-```text
-8801 / 2 / 0.1
-≈ 44005 Hz
-```
-
-lo cual es coherente con:
-
-```text
-44.1 kHz
-```
-
-La señal LRCL queda por tanto validada.
-
----
-
-# Interpretación de DOUT
 
 La señal verde:
 
@@ -847,158 +626,121 @@ La señal verde:
 CH2
 ```
 
-corresponde a:
+es:
 
 ```text
 DOUT compartido
 ```
 
-La captura muestra actividad digital durante ambas mitades del frame delimitado por LRCL.
+Se observa actividad digital durante ambas mitades de LRCL.
 
-Esto es consistente con:
+Esto significa que la misma línea física DOUT está transportando información durante:
 
 ```text
-SLOT0 -> un micrófono
-
-SLOT1 -> segundo micrófono
+SLOT0
 ```
 
-ambos transmitiendo sobre la misma línea física DOUT.
-
-El STM32 confirma este comportamiento al obtener simultáneamente:
+y durante:
 
 ```text
-raw_nz0 ≈ 44100
+SLOT1
+```
 
-raw_nz1 ≈ 44100
+lo cual es consistente con dos micrófonos compartiendo correctamente la misma línea.
+
+Conceptualmente:
+
+```text
+LRCL indica de quién es el turno.
+
+DOUT transporta los datos del micrófono correspondiente a ese turno.
 ```
 
 ---
 
-# Interferencia observada en DOUT
+# Interferencia observada
 
-La forma de onda DOUT no aparece completamente limpia.
+La línea DOUT no aparece completamente limpia.
 
-Se observa:
+Se observa cierta:
 
 ```text
-ruido
 rugosidad
-ringing / interferencia
-```
-
-sobre las transiciones digitales.
-
-Esta interferencia ya había sido observada parcialmente durante etapas anteriores del proyecto.
-
-Actualmente no se considera completamente resuelta.
-
----
-
-# Posibles causas de la interferencia
-
-Entre las posibles causas se mantienen abiertas:
-
-```text
-cableado provisional
-
-bifurcaciones físicas
-
-impedancia de la línea
-
-retornos de tierra
-
-proximidad entre conductores
-
-ringing producido por flancos rápidos
-
-ausencia de optimización del layout
-
-montaje mediante jumpers / cables temporales
-```
-
-Los cables utilizados en `BasicSetUpMicsPairs` fueron deliberadamente cortos para reducir:
-
-```text
-longitud de línea
-
-acoplamiento
-
-ruido
-
+ringing
 interferencia
 ```
 
-pero la forma de onda aún presenta imperfecciones visibles.
+Las posibles causas incluyen:
 
----
+```text
+cableado provisional
+bifurcaciones
+retornos de GND
+flancos rápidos
+layout temporal
+acoplamiento entre señales
+sondas del osciloscopio
+```
 
-# Importante sobre la interferencia
-
-La interferencia observada no impidió obtener:
+Sin embargo, esta interferencia no impidió obtener:
 
 ```text
 dos slots activos
-
-audio audible en ambos slots
-
-RAW válido en ambos slots
-
-PCM válido en ambos slots
-
+audio válido
+PCM válido
 JSON independiente
-
 WAV independiente
 ```
 
-Por tanto, actualmente se clasifica como:
+Por tanto se clasifica como:
 
 ```text
 OBSERVACIÓN / PENDIENTE DE OPTIMIZACIÓN
 ```
 
-y no como:
-
-```text
-FAIL
-```
-
-de la arquitectura de pares.
+y no como fallo de la arquitectura.
 
 ---
 
-# Resultados experimentales
+# Validación con distintas parejas de micrófonos
+
+Después de validar inicialmente MIC5 + MIC6, se decidió repetir la prueba con otras parejas.
+
+El objetivo era comprobar que el funcionamiento no dependiera únicamente de dos módulos concretos.
+
+Se probaron:
+
+```text
+MIC5 + MIC6
+
+MIC2 + MIC4
+
+MIC3 + MIC7
+```
+
+---
+
+# Pareja 1 - MIC5 + MIC6
 
 ## Sesión 1032
 
 Configuración:
 
 ```text
-MIC5
-SEL = VDD
--> SLOT1
-
-MIC6
-SEL = GND
--> SLOT0
+MIC5 SEL=VDD -> SLOT1
+MIC6 SEL=GND -> SLOT0
 ```
 
 Resultados:
 
 ```text
 SLOT0
+RMS  = 0.010494
+dBFS = -39.58
 
-samples = 44100
-RMS = 0.010494090498838982
-dBFS = -39.58110389713721
-```
-
-```text
 SLOT1
-
-samples = 44100
-RMS = 0.010630005579301414
-dBFS = -39.46933015062686
+RMS  = 0.010630
+dBFS = -39.47
 ```
 
 Comparación:
@@ -1006,11 +748,11 @@ Comparación:
 ```text
 exact_equal = 37
 
-equal_pct = 0.08390022675736962 %
+equal_pct = 0.0839 %
 
-correlation = 0.1702787298499451
+correlation = 0.1703
 
-rms_difference = 0.01360635608748369
+rms_difference = 0.01361
 ```
 
 Resultado:
@@ -1021,36 +763,21 @@ PASS
 
 ---
 
-# Sesión 1033
+## Sesión 1033
 
-Se invirtió únicamente SEL.
-
-Configuración:
+Se invirtieron los SEL:
 
 ```text
-MIC5
-SEL = GND
--> SLOT0
-
-MIC6
-SEL = VDD
--> SLOT1
+MIC5 SEL=GND -> SLOT0
+MIC6 SEL=VDD -> SLOT1
 ```
 
 Resultados:
 
 ```text
-SLOT0
+SLOT0 = -38.92 dBFS
 
-RMS = 0.011327264128756898
-dBFS = -38.917499450149855
-```
-
-```text
-SLOT1
-
-RMS = 0.010507329258770178
-dBFS = -39.57015316863736
+SLOT1 = -39.57 dBFS
 ```
 
 Comparación:
@@ -1058,11 +785,11 @@ Comparación:
 ```text
 exact_equal = 45
 
-equal_pct = 0.10204081632653061 %
+equal_pct = 0.102 %
 
-correlation = 0.3550662760130734
+correlation = 0.3551
 
-rms_difference = 0.01241736995890805
+rms_difference = 0.01242
 ```
 
 Resultado:
@@ -1071,83 +798,145 @@ Resultado:
 PASS
 ```
 
-Esta prueba confirmó que:
-
-```text
-el slot sigue a SEL
-```
-
-y no a un micrófono físico específico.
-
 ---
 
-# Sesión 1034 - referencia final
+## Sesión 1034
 
 Configuración:
 
 ```text
-MIC5
-SEL = GND
--> SLOT0
-
-MIC6
-SEL = VDD
--> SLOT1
+MIC5 SEL=GND -> SLOT0
+MIC6 SEL=VDD -> SLOT1
 ```
 
-Resultado STM32:
+Resultados:
+
+```text
+SLOT0 = -37.32 dBFS
+
+SLOT1 = -38.02 dBFS
+```
+
+Comparación:
+
+```text
+exact_equal = 36
+
+equal_pct = 0.0816 %
+
+correlation = 0.3895
+
+rms_difference = 0.01448
+```
+
+Resultado:
+
+```text
+PASS
+```
+
+Esta sesión también fue utilizada como referencia para la captura Hantek LRCL + DOUT.
+
+---
+
+# Conclusión MIC5 + MIC6
+
+La pareja funcionó correctamente en ambos sentidos de SEL.
+
+Se validó:
+
+```text
+DOUT compartido
+
+SLOT0 + SLOT1 simultáneos
+
+datos independientes
+
+WAV independientes
+
+cambio de slot mediante SEL
+```
+
+Estado:
+
+```text
+MIC5 + MIC6
+PASS
+```
+
+---
+
+# Pareja 2 - MIC2 + MIC4
+
+## Sesión 1035
+
+Configuración:
+
+```text
+MIC2 SEL=GND -> SLOT0
+MIC4 SEL=VDD -> SLOT1
+```
+
+Resultados:
+
+```text
+MIC2 / SLOT0
+dBFS = -38.65
+
+MIC4 / SLOT1
+dBFS = -44.90
+```
+
+Diferencia aproximada:
+
+```text
+6.25 dB
+```
+
+Resultado digital:
 
 ```text
 raw_nz0 = 44100
-raw_nz1 = 44100
-
-raw_or0 = 00FFFFFE
-raw_or1 = 00FFFFFE
-
-pcm_nz0 = 44066
-pcm_nz1 = 44061
+raw_nz1 = 44099
 ```
 
-SLOT0:
+Estado:
 
 ```text
-min  = -0.062713623046875
-
-max  = 0.05572509765625
-
-peak = 0.062713623046875
-
-rms  = 0.01360993151184579
-
-dBFS = -37.32288120512109
+PASS
 ```
 
-SLOT1:
+---
+
+## Sesión 1036
+
+Configuración inversa:
 
 ```text
-min  = -0.056304931640625
-
-max  = 0.06158447265625
-
-peak = 0.06158447265625
-
-rms  = 0.012559465056942755
-
-dBFS = -38.020577160647576
+MIC2 SEL=VDD -> SLOT1
+MIC4 SEL=GND -> SLOT0
 ```
 
-Comparación entre ambos canales:
+Resultados:
 
 ```text
-samples = 44100
+MIC4 / SLOT0
+dBFS = -45.70
 
-exact_equal = 36
+MIC2 / SLOT1
+dBFS = -38.22
+```
 
-equal_pct = 0.08163265306122448 %
+Comparación:
 
-correlation = 0.38952116546252347
+```text
+exact_equal = 50
 
-rms_difference = 0.014484682008131439
+equal_pct = 0.1134 %
+
+correlation = 0.2398
+
+rms_difference = 0.01213
 ```
 
 Resultado:
@@ -1158,93 +947,678 @@ PASS
 
 ---
 
-# Interpretación de la correlación
+# Observación sobre MIC4
 
-Los dos micrófonos se encuentran físicamente próximos y reciben la misma fuente acústica.
+MIC4 presenta consistentemente menor nivel acústico que MIC2.
 
-Por esta razón es normal observar cierta correlación entre ambos canales.
-
-Sin embargo:
-
-```text
-correlation != 1
-```
-
-y únicamente:
-
-```text
-36 muestras de 44100
-```
-
-fueron exactamente iguales durante la sesión 1034.
-
-Esto representa aproximadamente:
-
-```text
-0.0816 %
-```
-
-de las muestras.
+La diferencia siguió al micrófono físico cuando se intercambiaron los slots.
 
 Por tanto:
 
 ```text
-SLOT0 y SLOT1 NO son copias digitales uno del otro.
+el nivel bajo NO pertenece al SLOT0
+
+el nivel bajo NO pertenece al SLOT1
+
+el nivel bajo sigue a MIC4
 ```
 
-Cada slot contiene una señal independiente.
+MIC4 continúa siendo:
+
+```text
+digitalmente funcional
+acústicamente útil
+```
+
+pero con menor nivel que otros micrófonos probados.
+
+Estado:
+
+```text
+MIC4
+FUNCIONAL
+NIVEL ACÚSTICO MENOR
+```
 
 ---
 
-# Prueba inicial anómala
-
-Durante una prueba anterior se observó temporalmente:
+# Conclusión MIC2 + MIC4
 
 ```text
-PI6_trans = 368194
+MIC2 + MIC4
+PASS
+```
 
+La segunda pareja validó nuevamente:
+
+```text
+2 mics
+1 DOUT
+2 slots
+cambio de SEL
+audio independiente
+```
+
+---
+
+# Pareja 3 - MIC3 + MIC7
+
+Esta pareja presentó un comportamiento más irregular.
+
+Las primeras pruebas mostraron que ambos micrófonos habían funcionado correctamente de forma individual anteriormente.
+
+Sin embargo, al realizar múltiples cambios físicos de SEL y cableado, comenzaron a observarse resultados inconsistentes.
+
+---
+
+# Sesión 1037
+
+Configuración:
+
+```text
+MIC3 SEL=GND -> SLOT0
+MIC7 SEL=VDD -> SLOT1
+```
+
+Resultados:
+
+```text
+MIC3 / SLOT0
+-41.95 dBFS
+
+MIC7 / SLOT1
+-79.71 dBFS
+```
+
+MIC3 produjo audio útil.
+
+MIC7 quedó prácticamente al nivel de ruido.
+
+---
+
+# Sesión 1038
+
+Configuración prevista:
+
+```text
+MIC3 SEL=VDD -> SLOT1
+MIC7 SEL=GND -> SLOT0
+```
+
+Resultados:
+
+```text
+SLOT0 = -80.22 dBFS
+
+SLOT1 = -38.90 dBFS
+```
+
+El comportamiento bajo cambió de slot.
+
+Esto inicialmente hizo sospechar de MIC7.
+
+---
+
+# Sesiones 1039 y 1040
+
+Después de manipular físicamente conexiones y soldaduras:
+
+```text
+PI6_high  = 0
+PI6_trans = 0
+```
+
+y:
+
+```text
 raw_nz0 = 0
+raw_nz1 = 0
+```
+
+Los dos slots quedaron completamente en cero.
+
+Se verificó con multímetro:
+
+```text
+continuidad de DOUT
+continuidad de BCLK
+continuidad de LRCL
+3.3 V
+GND
+SEL
+```
+
+sin encontrar una discontinuidad evidente.
+
+---
+
+# Prueba de aislamiento MIC3 / MIC7
+
+Para identificar qué micrófono estaba afectando el bus se desconectaron individualmente los DOUT.
+
+---
+
+## Sesión 1041
+
+Configuración:
+
+```text
+MIC3 SEL=GND
+MIC3 DOUT conectado
+
+MIC7 SEL=VDD
+MIC7 DOUT desconectado
+```
+
+Resultado:
+
+```text
+SLOT0 = -76.64 dBFS
+
+SLOT1 = 0
+```
+
+PI6 volvió a tener actividad:
+
+```text
+PI6_trans = 28833
+```
+
+pero MIC3 entregó un nivel extremadamente bajo.
+
+---
+
+## Sesión 1042
+
+Configuración opuesta:
+
+```text
+MIC3 DOUT desconectado
+
+MIC7 SEL=VDD
+MIC7 DOUT conectado
+```
+
+Resultado:
+
+```text
+SLOT0 = 0
+
+SLOT1 = -38.82 dBFS
+```
+
+Además:
+
+```text
+raw_nz1 = 44098
+
+pcm_nz1 = 44053
+
+PI6_trans = 41084
+```
+
+Esto confirmó que:
+
+```text
+MIC7 funciona correctamente de forma individual.
+```
+
+---
+
+# Remontaje físico de MIC3
+
+Después de desconectar y volver a conectar MIC3 se realizaron nuevas pruebas.
+
+---
+
+# Sesión 1043
+
+Configuración:
+
+```text
+MIC3 SEL=GND -> SLOT0
+MIC7 SEL=VDD -> SLOT1
+```
+
+Resultados:
+
+```text
+SLOT0 / MIC3 = -53.06 dBFS
+
+SLOT1 / MIC7 = -38.27 dBFS
+```
+
+Ambos slots estuvieron activos:
+
+```text
+raw_nz0 = 44095
+raw_nz1 = 44099
+```
+
+Resultado:
+
+```text
+FUNCIONAL
+```
+
+aunque MIC3 presentó menor nivel que anteriormente.
+
+---
+
+# Sesión 1046
+
+Misma configuración:
+
+```text
+MIC3 SEL=GND
+MIC7 SEL=VDD
+```
+
+pero se obtuvo:
+
+```text
+SLOT0
+peak = 0.999969
+RMS  = -6.78 dBFS
+
+SLOT1
+0
+```
+
+Este resultado no corresponde a audio normal.
+
+Se considera una captura:
+
+```text
+CORRUPTA / NO VÁLIDA
+```
+
+probablemente relacionada con el estado físico de las conexiones SEL.
+
+---
+
+# Sesiones 1047 y 1048
+
+Después de volver a manipular los cables sin cambiar la configuración lógica:
+
+```text
+MIC3 SEL=GND -> SLOT0
+MIC7 SEL=VDD -> SLOT1
+```
+
+el sistema volvió a funcionar.
+
+## Sesión 1047
+
+```text
+MIC3 / SLOT0 = -50.23 dBFS
+
+MIC7 / SLOT1 = -39.18 dBFS
+```
+
+Comparación:
+
+```text
+exact_equal = 37
+
+equal_pct = 0.0839 %
+
+correlation = 0.4161
+
+rms_difference = 0.01010
+```
+
+---
+
+## Sesión 1048
+
+```text
+MIC3 / SLOT0 = -52.52 dBFS
+
+MIC7 / SLOT1 = -38.99 dBFS
+```
+
+Comparación:
+
+```text
+exact_equal = 50
+
+equal_pct = 0.1134 %
+
+correlation = 0.4032
+
+rms_difference = 0.01050
+```
+
+En ambas sesiones:
+
+```text
+SLOT0 activo
+SLOT1 activo
+```
+
+Resultado:
+
+```text
+FUNCIONAL
+```
+
+aunque MIC3 continúa presentando un nivel menor que el histórico.
+
+---
+
+# Pruebas MIC3 con SEL=VDD
+
+Posteriormente se realizó la configuración inversa:
+
+```text
+MIC3 SEL=VDD -> SLOT1
+
+MIC7 SEL=GND -> SLOT0
+```
+
+Se realizaron varias capturas consecutivas.
+
+---
+
+## Sesión 1049
+
+Resultado:
+
+```text
+SLOT0
+peak = 0.999969
+RMS  = -7.58 dBFS
+
+SLOT1
+0
+```
+
+---
+
+## Sesión 1050
+
+Resultado:
+
+```text
+SLOT0
+peak = 0.999969
+RMS  = -7.08 dBFS
+
+SLOT1
+0
+```
+
+---
+
+## Sesión 1051
+
+Resultado:
+
+```text
+SLOT0
+peak = 0.999969
+RMS  = -5.58 dBFS
+
+SLOT1
+0
+```
+
+Las tres pruebas fueron muy repetibles.
+
+En todas:
+
+```text
+raw_nz0 ≈ 44100
 
 raw_nz1 = 0
 ```
 
-Este comportamiento no volvió a repetirse en las capturas posteriores.
+---
 
-Las sesiones 1032, 1033 y 1034 mostraron:
+# Hipótesis actual sobre MIC3 y SEL
+
+El patrón observado es compatible con un problema físico en la conexión SEL de MIC3, especialmente cuando se intenta configurar:
 
 ```text
-PI6_trans ≈ 80000
+MIC3 SEL=VDD
 ```
 
-junto con datos válidos en ambos slots.
+El comportamiento esperado sería:
 
-Actualmente esta primera captura se considera una condición transitoria del montaje físico o del contacto eléctrico durante la preparación inicial del par.
+```text
+MIC7 SEL=GND
+-> SLOT0
 
-No se utilizó como resultado válido de la arquitectura.
+MIC3 SEL=VDD
+-> SLOT1
+```
+
+Sin embargo, los resultados observados son compatibles con una situación como:
+
+```text
+MIC7 realmente está en GND
+-> SLOT0
+
+MIC3 debería estar en VDD
+-> SLOT1
+
+pero su SEL no está llegando correctamente o de forma estable a VDD
+
+MIC3 termina comportándose también como SLOT0
+```
+
+En ese caso:
+
+```text
+MIC3 transmite en SLOT0
++
+MIC7 transmite en SLOT0
+```
+
+y ambos intentan controlar DOUT al mismo tiempo.
+
+Esto puede provocar:
+
+```text
+conflicto eléctrico en DOUT
+
+datos corruptos
+
+valores cercanos a saturación
+
+SLOT0 con peak ≈ 1.0
+
+SLOT1 completamente vacío
+```
+
+Este comportamiento coincide con las sesiones:
+
+```text
+1049
+1050
+1051
+```
 
 ---
 
-# Observación térmica
+# Estado actual de MIC3
 
-Durante algunas pruebas se observó que uno de los módulos parecía presentar una temperatura ligeramente superior al otro en la zona central correspondiente al encapsulado del micrófono.
-
-No se observó una temperatura extrema ni un fallo posterior del dispositivo.
-
-El micrófono había sido previamente validado de forma individual y continuó funcionando correctamente durante las pruebas posteriores de pares.
-
-Esta observación queda registrada como:
+Cuando MIC3 utiliza:
 
 ```text
-PENDIENTE DE MONITOREO
+SEL=GND
 ```
 
-No se considera actualmente evidencia suficiente para diagnosticar un fallo del micrófono.
+se han obtenido capturas con audio útil:
+
+```text
+1037 -> -41.95 dBFS
+
+1043 -> -53.06 dBFS
+
+1047 -> -50.23 dBFS
+
+1048 -> -52.52 dBFS
+```
+
+Por tanto:
+
+```text
+MIC3 con SEL=GND
+-> SLOT0 funcional
+```
+
+aunque actualmente presenta menor nivel acústico que en sus primeras pruebas individuales.
+
+Cuando MIC3 utiliza:
+
+```text
+SEL=VDD
+```
+
+las últimas pruebas repetidas muestran:
+
+```text
+SLOT1 vacío
+
+SLOT0 saturado/corrupto
+```
+
+Por tanto, actualmente se considera:
+
+```text
+MIC3 SEL=VDD
+PENDIENTE DE REVISIÓN FÍSICA
+```
+
+---
+
+# Estado actual de MIC7
+
+MIC7 fue validado individualmente durante la prueba 1042:
+
+```text
+MIC7 SEL=VDD
+-> SLOT1
+
+RMS = -38.82 dBFS
+```
+
+También funcionó correctamente dentro del par en:
+
+```text
+1043
+1047
+1048
+```
+
+con valores cercanos a:
+
+```text
+-38 a -39 dBFS
+```
+
+Por tanto:
+
+```text
+MIC7
+FUNCIONAL
+```
+
+---
+
+# Interpretación importante
+
+Los resultados de MIC3 + MIC7 NO invalidan la arquitectura:
+
+```text
+2 mics
+1 DOUT
+2 slots
+```
+
+porque dicha arquitectura ya fue validada repetidamente con:
+
+```text
+MIC5 + MIC6
+```
+
+y:
+
+```text
+MIC2 + MIC4
+```
+
+Además, MIC3 + MIC7 también produjo capturas correctas cuando los estados SEL quedaron aparentemente bien establecidos.
+
+El problema actual se considera relacionado principalmente con:
+
+```text
+montaje físico
+
+cables SEL
+
+contactos
+
+estado eléctrico real de SEL
+```
+
+y no con:
+
+```text
+SAI2A
+PI6
+DMA
+separación de slots
+firmware
+Python
+```
+
+---
+
+# Resumen de parejas probadas
+
+| Pareja | Configuración | Resultado |
+|---|---|---|
+| MIC5 + MIC6 | SEL opuestos | PASS |
+| MIC5 + MIC6 | SEL invertidos | PASS |
+| MIC2 + MIC4 | SEL opuestos | PASS |
+| MIC2 + MIC4 | SEL invertidos | PASS |
+| MIC3 + MIC7 | MIC3=GND / MIC7=VDD | Funcional, MIC3 con menor nivel |
+| MIC3 + MIC7 | MIC3=VDD / MIC7=GND | Problema repetible / pendiente SEL MIC3 |
+
+---
+
+# Estado general de los micrófonos utilizados
+
+```text
+MIC2
+FUNCIONAL
+
+MIC3
+FUNCIONAL con SEL=GND
+SEL=VDD pendiente de revisión física
+
+MIC4
+FUNCIONAL
+nivel acústico menor
+
+MIC5
+FUNCIONAL
+
+MIC6
+FUNCIONAL
+
+MIC7
+FUNCIONAL
+```
 
 ---
 
 # Validación obtenida
 
-Las pruebas realizadas permiten marcar como validados:
+Las pruebas permiten marcar como validados:
 
 ```text
 2 micrófonos físicos                         PASS
@@ -1275,24 +1649,26 @@ JSON independiente por slot                  PASS
 
 WAV independiente por slot                   PASS
 
-Audio audible en ambos canales               PASS
-
 Datos no duplicados                          PASS
 
 Captura Hantek LRCL + DOUT                   PASS
 ```
 
-Permanece pendiente:
+Quedan pendientes:
 
 ```text
-optimización de integridad de señal / ringing / interferencia
+optimización de integridad de señal
+
+ringing / interferencia
+
+revisión física SEL de MIC3
 ```
 
 ---
 
 # Conclusión
 
-`BasicSetUpMicsPairs` demuestra correctamente que **dos micrófonos ICS-43434 pueden compartir una única línea de datos DOUT** siempre que utilicen estados SEL opuestos.
+`BasicSetUpMicsPairs` demuestra correctamente que **dos micrófonos ICS-43434 pueden compartir una única línea de datos DOUT**, utilizando estados SEL opuestos.
 
 La arquitectura validada es:
 
@@ -1320,30 +1696,52 @@ VDD
 GND
 ```
 
-y el STM32 separa correctamente sus datos en:
+y el STM32 separa correctamente:
 
 ```text
 SLOT0
 SLOT1
 ```
 
-Las pruebas con inversión de SEL confirmaron además que:
+La arquitectura fue validada con más de una pareja física:
 
 ```text
-el slot depende de SEL
+MIC5 + MIC6
+PASS
+
+MIC2 + MIC4
+PASS
 ```
 
-y no de la identidad física del micrófono.
-
-Los análisis numéricos confirmaron que:
+La pareja:
 
 ```text
-SLOT0 != SLOT1
+MIC3 + MIC7
 ```
 
-y que ambos contienen señales acústicas diferentes.
+también produjo capturas válidas cuando:
 
-Por tanto, el objetivo principal de esta etapa queda cumplido.
+```text
+MIC3 SEL=GND
+MIC7 SEL=VDD
+```
+
+pero actualmente presenta un problema repetible cuando se intenta utilizar:
+
+```text
+MIC3 SEL=VDD
+```
+
+El comportamiento observado es compatible con una conexión SEL física inestable que podría provocar que MIC3 no cambie correctamente a SLOT1 y termine transmitiendo junto con MIC7 en SLOT0.
+
+Esto produce:
+
+```text
+SLOT0 corrupto / saturado
+SLOT1 vacío
+```
+
+Por tanto, este problema queda documentado como una incidencia física pendiente y no como una falla de la arquitectura `BasicSetUpMicsPairs`.
 
 ---
 
@@ -1383,14 +1781,6 @@ SLOTS
 PHYSICAL MICROPHONES
 2
 
-MIC A
-SEL = GND
--> SLOT0
-
-MIC B
-SEL = VDD
--> SLOT1
-
 DMA
 Circular
 
@@ -1403,29 +1793,32 @@ JSON
 WAV
 ```
 
-Estado:
+Estado general:
 
 ```text
-BasicSetUpMicsPairs
-
 2 MIC
 1 DOUT
 2 SLOTS
 
-STATUS: VALIDATED
+ARCHITECTURE STATUS:
+VALIDATED
+```
+
+Observaciones:
+
+```text
+MIC4 -> funcional con menor nivel
+
+MIC3 -> revisar SEL=VDD
+
+DOUT -> ringing/interferencia visible pendiente de optimización
 ```
 
 ---
 
 # Próxima etapa
 
-Después de validar una pareja sobre:
-
-```text
-PI6 / SAI2A
-```
-
-la siguiente arquitectura a evaluar será:
+Una vez cerrada esta fase, la siguiente arquitectura será:
 
 ```text
 PAIR A
@@ -1437,23 +1830,60 @@ PAIR B
 -> PG10 / SAI2B
 ```
 
-para alcanzar nuevamente:
+Los cuatro micrófonos compartirán:
 
 ```text
-4 micrófonos físicos
+BCLK
+LRCL
+3.3 V
+GND
 ```
 
-manteniendo:
+pero existirán dos líneas DOUT:
 
 ```text
-BCLK compartido
+PAIR A DOUT -> PI6
 
-LRCL compartido
-
-2 micrófonos por línea DOUT
+PAIR B DOUT -> PG10
 ```
 
-Antes de incorporar:
+La estrategia será:
+
+```text
+1. validar primero 2 mics sobre PI6
+
+2. validar 2 mics sobre PG10 de forma independiente
+
+3. activar PI6 + PG10 simultáneamente
+
+4. comprobar 4 señales independientes
+
+5. generar 4 WAV
+
+6. comprobar sincronización
+
+7. posteriormente reincorporar SDRAM y captura continua
+```
+
+La arquitectura esperada será:
+
+```text
+SAI2A SLOT0 -> MIC A0
+SAI2A SLOT1 -> MIC A1
+
+SAI2B SLOT0 -> MIC B0
+SAI2B SLOT1 -> MIC B1
+```
+
+Objetivo de la siguiente fase:
+
+```text
+4 micrófonos
+2 líneas DOUT
+4 señales independientes
+```
+
+antes de reincorporar:
 
 ```text
 SDRAM
@@ -1462,15 +1892,5 @@ MFCC
 TFLite
 Khamex
 ```
-
-se deberá validar primero eléctricamente y mediante WAV que:
-
-```text
-PI6 -> SLOT0 + SLOT1
-
-PG10 -> SLOT0 + SLOT1
-```
-
-funcionen simultáneamente y mantengan cuatro señales independientes.
 
 ---
