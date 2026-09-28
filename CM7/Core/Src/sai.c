@@ -1,7 +1,10 @@
 #include "sai.h"
 
 SAI_HandleTypeDef hsai_BlockA2;
+SAI_HandleTypeDef hsai_BlockB2;
+
 DMA_HandleTypeDef hdma_sai2_a;
+DMA_HandleTypeDef hdma_sai2_b;
 
 void MX_SAI2_Init(void)
 {
@@ -26,6 +29,28 @@ void MX_SAI2_Init(void)
     {
         Error_Handler();
     }
+
+    hsai_BlockB2.Instance = SAI2_Block_B;
+    hsai_BlockB2.Init.AudioMode = SAI_MODESLAVE_RX;
+    hsai_BlockB2.Init.Synchro = SAI_SYNCHRONOUS;
+    hsai_BlockB2.Init.OutputDrive = SAI_OUTPUTDRIVE_DISABLE;
+    hsai_BlockB2.Init.NoDivider = SAI_MASTERDIVIDER_ENABLE;
+    hsai_BlockB2.Init.MckOverSampling = SAI_MCK_OVERSAMPLING_DISABLE;
+    hsai_BlockB2.Init.FIFOThreshold = SAI_FIFOTHRESHOLD_EMPTY;
+    hsai_BlockB2.Init.AudioFrequency = SAI_AUDIO_FREQUENCY_44K;
+    hsai_BlockB2.Init.SynchroExt = SAI_SYNCEXT_DISABLE;
+    hsai_BlockB2.Init.MonoStereoMode = SAI_STEREOMODE;
+    hsai_BlockB2.Init.CompandingMode = SAI_NOCOMPANDING;
+    hsai_BlockB2.Init.TriState = SAI_OUTPUT_NOTRELEASED;
+
+    if (HAL_SAI_InitProtocol(
+            &hsai_BlockB2,
+            SAI_I2S_STANDARD,
+            SAI_PROTOCOL_DATASIZE_24BIT,
+            2U) != HAL_OK)
+    {
+        Error_Handler();
+    }
 }
 
 void HAL_SAI_MspInit(SAI_HandleTypeDef *saiHandle)
@@ -37,7 +62,7 @@ void HAL_SAI_MspInit(SAI_HandleTypeDef *saiHandle)
         __HAL_RCC_SAI2_CLK_ENABLE();
         __HAL_RCC_GPIOI_CLK_ENABLE();
 
-        GPIO_InitStruct.Pin = GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7;
+        GPIO_InitStruct.Pin = GPIO_PIN_5 | GPIO_PIN_7;
         GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
         GPIO_InitStruct.Pull = GPIO_NOPULL;
         GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
@@ -62,17 +87,54 @@ void HAL_SAI_MspInit(SAI_HandleTypeDef *saiHandle)
 
         __HAL_LINKDMA(saiHandle, hdmarx, hdma_sai2_a);
     }
+    else if (saiHandle->Instance == SAI2_Block_B)
+    {
+        __HAL_RCC_SAI2_CLK_ENABLE();
+        __HAL_RCC_GPIOG_CLK_ENABLE();
+
+        GPIO_InitStruct.Pin = GPIO_PIN_10;
+        GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+        GPIO_InitStruct.Pull = GPIO_NOPULL;
+        GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+        GPIO_InitStruct.Alternate = GPIO_AF10_SAI2;
+        HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
+
+        hdma_sai2_b.Instance = DMA1_Stream1;
+        hdma_sai2_b.Init.Request = DMA_REQUEST_SAI2_B;
+        hdma_sai2_b.Init.Direction = DMA_PERIPH_TO_MEMORY;
+        hdma_sai2_b.Init.PeriphInc = DMA_PINC_DISABLE;
+        hdma_sai2_b.Init.MemInc = DMA_MINC_ENABLE;
+        hdma_sai2_b.Init.PeriphDataAlignment = DMA_PDATAALIGN_WORD;
+        hdma_sai2_b.Init.MemDataAlignment = DMA_MDATAALIGN_WORD;
+        hdma_sai2_b.Init.Mode = DMA_CIRCULAR;
+        hdma_sai2_b.Init.Priority = DMA_PRIORITY_VERY_HIGH;
+        hdma_sai2_b.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
+
+        if (HAL_DMA_Init(&hdma_sai2_b) != HAL_OK)
+        {
+            Error_Handler();
+        }
+
+        __HAL_LINKDMA(saiHandle, hdmarx, hdma_sai2_b);
+    }
 }
 
 void HAL_SAI_MspDeInit(SAI_HandleTypeDef *saiHandle)
 {
     if (saiHandle->Instance == SAI2_Block_A)
     {
-        __HAL_RCC_SAI2_CLK_DISABLE();
-
         HAL_GPIO_DeInit(
             GPIOI,
-            GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7
+            GPIO_PIN_5 | GPIO_PIN_7
+        );
+
+        HAL_DMA_DeInit(saiHandle->hdmarx);
+    }
+    else if (saiHandle->Instance == SAI2_Block_B)
+    {
+        HAL_GPIO_DeInit(
+            GPIOG,
+            GPIO_PIN_10
         );
 
         HAL_DMA_DeInit(saiHandle->hdmarx);

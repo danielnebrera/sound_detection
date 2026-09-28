@@ -25,6 +25,9 @@
 #define LED_OFF(pin)             HAL_GPIO_WritePin(GPIOK, (pin), GPIO_PIN_SET)
 
 __attribute__((section(".RAM_D2_bss"), aligned(32)))
+static uint32_t s_dma_clock_a[DMA_WORDS_TOTAL];
+
+__attribute__((section(".RAM_D2_bss"), aligned(32)))
 static uint32_t s_dma_raw[DMA_WORDS_TOTAL];
 
 static int16_t s_pcm_slot0[AUDIO_FRAMES];
@@ -170,7 +173,7 @@ static void copy_dma_half_to_pcm(
 
 void HAL_SAI_RxHalfCpltCallback(SAI_HandleTypeDef *hsai)
 {
-    if ((hsai != NULL) && (hsai->Instance == SAI2_Block_A))
+    if ((hsai != NULL) && (hsai->Instance == SAI2_Block_B))
     {
         copy_dma_half_to_pcm(
             &s_dma_raw[0],
@@ -181,7 +184,7 @@ void HAL_SAI_RxHalfCpltCallback(SAI_HandleTypeDef *hsai)
 
 void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai)
 {
-    if ((hsai != NULL) && (hsai->Instance == SAI2_Block_A))
+    if ((hsai != NULL) && (hsai->Instance == SAI2_Block_B))
     {
         copy_dma_half_to_pcm(
             &s_dma_raw[DMA_WORDS_PER_HALF],
@@ -192,12 +195,13 @@ void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai)
 
 void HAL_SAI_ErrorCallback(SAI_HandleTypeDef *hsai)
 {
-    if ((hsai != NULL) && (hsai->Instance == SAI2_Block_A))
+    if ((hsai != NULL) &&
+        ((hsai->Instance == SAI2_Block_A) ||
+         (hsai->Instance == SAI2_Block_B)))
     {
         s_sai_error_count++;
     }
 }
-
 
 typedef struct
 {
@@ -206,8 +210,8 @@ typedef struct
     uint32_t pi5_high;
     uint32_t pi5_transitions;
 
-    uint32_t pi6_high;
-    uint32_t pi6_transitions;
+    uint32_t pg10_high;
+    uint32_t pg10_transitions;
 
     uint32_t pi7_high;
     uint32_t pi7_transitions;
@@ -229,17 +233,27 @@ static void sample_sai_pins_digital(
 
     memset(diag, 0, sizeof(*diag));
 
-    uint32_t previous_pi5 = gpio_pin_level(GPIOI, GPIO_PIN_5);
-    uint32_t previous_pi6 = gpio_pin_level(GPIOI, GPIO_PIN_6);
-    uint32_t previous_pi7 = gpio_pin_level(GPIOI, GPIO_PIN_7);
+    uint32_t previous_pi5 =
+        gpio_pin_level(GPIOI, GPIO_PIN_5);
+
+    uint32_t previous_pg10 =
+        gpio_pin_level(GPIOG, GPIO_PIN_10);
+
+    uint32_t previous_pi7 =
+        gpio_pin_level(GPIOI, GPIO_PIN_7);
 
     const uint32_t start_ms = HAL_GetTick();
 
     while ((HAL_GetTick() - start_ms) < duration_ms)
     {
-        const uint32_t pi5 = gpio_pin_level(GPIOI, GPIO_PIN_5);
-        const uint32_t pi6 = gpio_pin_level(GPIOI, GPIO_PIN_6);
-        const uint32_t pi7 = gpio_pin_level(GPIOI, GPIO_PIN_7);
+        const uint32_t pi5 =
+            gpio_pin_level(GPIOI, GPIO_PIN_5);
+
+        const uint32_t pg10 =
+            gpio_pin_level(GPIOG, GPIO_PIN_10);
+
+        const uint32_t pi7 =
+            gpio_pin_level(GPIOI, GPIO_PIN_7);
 
         diag->samples++;
 
@@ -248,9 +262,9 @@ static void sample_sai_pins_digital(
             diag->pi5_high++;
         }
 
-        if (pi6 != 0U)
+        if (pg10 != 0U)
         {
-            diag->pi6_high++;
+            diag->pg10_high++;
         }
 
         if (pi7 != 0U)
@@ -263,9 +277,9 @@ static void sample_sai_pins_digital(
             diag->pi5_transitions++;
         }
 
-        if (pi6 != previous_pi6)
+        if (pg10 != previous_pg10)
         {
-            diag->pi6_transitions++;
+            diag->pg10_transitions++;
         }
 
         if (pi7 != previous_pi7)
@@ -274,7 +288,7 @@ static void sample_sai_pins_digital(
         }
 
         previous_pi5 = pi5;
-        previous_pi6 = pi6;
+        previous_pg10 = pg10;
         previous_pi7 = pi7;
     }
 }
@@ -283,14 +297,14 @@ static void emit_pin_and_dma_diag(void)
 {
     char line[360];
 
-    const uint32_t pi6_mode =
-        (GPIOI->MODER >> (6U * 2U)) & 0x3U;
+    const uint32_t pg10_mode =
+        (GPIOG->MODER >> (10U * 2U)) & 0x3U;
 
-    const uint32_t pi6_pupd =
-        (GPIOI->PUPDR >> (6U * 2U)) & 0x3U;
+    const uint32_t pg10_pupd =
+        (GPIOG->PUPDR >> (10U * 2U)) & 0x3U;
 
-    const uint32_t pi6_af =
-        (GPIOI->AFR[0] >> (6U * 4U)) & 0xFU;
+    const uint32_t pg10_af =
+        (GPIOG->AFR[1] >> ((10U - 8U) * 4U)) & 0xFU;
 
     const uint32_t dcache_enabled =
         ((SCB->CCR & (1UL << 16)) != 0U) ? 1U : 0U;
@@ -298,11 +312,12 @@ static void emit_pin_and_dma_diag(void)
     snprintf(
         line,
         sizeof(line),
-        "[PINCFG] PI6 mode=%lu pupd=%lu af=%lu\r\n",
-        (unsigned long)pi6_mode,
-        (unsigned long)pi6_pupd,
-        (unsigned long)pi6_af
+        "[PINCFG] PG10 mode=%lu pupd=%lu af=%lu\r\n",
+        (unsigned long)pg10_mode,
+        (unsigned long)pg10_pupd,
+        (unsigned long)pg10_af
     );
+
     uart_send_text(line);
 
     snprintf(
@@ -313,36 +328,45 @@ static void emit_pin_and_dma_diag(void)
         (unsigned long)(uintptr_t)s_dma_raw,
         (unsigned long)sizeof(s_dma_raw),
         (unsigned long)dcache_enabled,
-        (unsigned long)((DMA_Stream_TypeDef *)hsai_BlockA2.hdmarx->Instance)->M0AR,
-        (unsigned long)((DMA_Stream_TypeDef *)hsai_BlockA2.hdmarx->Instance)->NDTR
+        (unsigned long)((DMA_Stream_TypeDef *)
+            hsai_BlockB2.hdmarx->Instance)->M0AR,
+        (unsigned long)((DMA_Stream_TypeDef *)
+            hsai_BlockB2.hdmarx->Instance)->NDTR
     );
+
     uart_send_text(line);
 
     GpioIdrDiag diag;
     sample_sai_pins_digital(&diag, 100U);
 
-    const uint32_t pi5_low = diag.samples - diag.pi5_high;
-    const uint32_t pi6_low = diag.samples - diag.pi6_high;
-    const uint32_t pi7_low = diag.samples - diag.pi7_high;
+    const uint32_t pi5_low =
+        diag.samples - diag.pi5_high;
+
+    const uint32_t pg10_low =
+        diag.samples - diag.pg10_high;
+
+    const uint32_t pi7_low =
+        diag.samples - diag.pi7_high;
 
     snprintf(
         line,
         sizeof(line),
         "[GPIO_IDR] duration_ms=100 samples=%lu "
         "PI5_high=%lu PI5_low=%lu PI5_trans=%lu "
-        "PI6_high=%lu PI6_low=%lu PI6_trans=%lu "
+        "PG10_high=%lu PG10_low=%lu PG10_trans=%lu "
         "PI7_high=%lu PI7_low=%lu PI7_trans=%lu\r\n",
         (unsigned long)diag.samples,
         (unsigned long)diag.pi5_high,
         (unsigned long)pi5_low,
         (unsigned long)diag.pi5_transitions,
-        (unsigned long)diag.pi6_high,
-        (unsigned long)pi6_low,
-        (unsigned long)diag.pi6_transitions,
+        (unsigned long)diag.pg10_high,
+        (unsigned long)pg10_low,
+        (unsigned long)diag.pg10_transitions,
         (unsigned long)diag.pi7_high,
         (unsigned long)pi7_low,
         (unsigned long)diag.pi7_transitions
     );
+
     uart_send_text(line);
 }
 
@@ -350,6 +374,7 @@ static bool capture_exact_second(void)
 {
     char line[320];
 
+    memset(s_dma_clock_a, 0, sizeof(s_dma_clock_a));
     memset(s_dma_raw, 0, sizeof(s_dma_raw));
     memset(s_pcm_slot0, 0, sizeof(s_pcm_slot0));
     memset(s_pcm_slot1, 0, sizeof(s_pcm_slot1));
@@ -371,45 +396,42 @@ static bool capture_exact_second(void)
 
     uart_send_text(
         "[CAPTURE_STARTED] preroll_clock_ms=3000 sample_rate=44100 "
-        "frames=44100 sai=SAI2A data=PI6\r\n"
+        "frames=44100 sai=SAI2B data=PG10 clock_master=SAI2A\r\n"
     );
 
     LED_OFF(LED_RED_Pin);
     LED_OFF(LED_BLUE_Pin);
     LED_ON(LED_GREEN_Pin);
 
-    /*
-     * Arrancar SAI2A ANTES del pre-roll.
-     * Durante estos 3 s PI5/PI7 ya generan BCLK/WS y el micro puede
-     * salir de power-down/estabilizarse. Los callbacks se descartan
-     * porque s_capture_active sigue en false.
-     */
     if (HAL_SAI_Receive_DMA(
-            &hsai_BlockA2,
+            &hsai_BlockB2,
             (uint8_t *)s_dma_raw,
             (uint16_t)DMA_WORDS_TOTAL) != HAL_OK)
     {
         LED_OFF(LED_GREEN_Pin);
         LED_ON(LED_RED_Pin);
-        uart_send_text("[CAPTURE_START_FAIL]\r\n");
+        uart_send_text("[CAPTURE_START_FAIL] sai=SAI2B\r\n");
         return false;
     }
 
-    /*
-     * Dejar estabilizar brevemente los clocks y después comprobar el nivel
-     * digital que el propio STM32 ve en PI5/PI6/PI7 mientras siguen en AF10.
-     */
+    if (HAL_SAI_Receive_DMA(
+            &hsai_BlockA2,
+            (uint8_t *)s_dma_clock_a,
+            (uint16_t)DMA_WORDS_TOTAL) != HAL_OK)
+    {
+        HAL_SAI_DMAStop(&hsai_BlockB2);
+
+        LED_OFF(LED_GREEN_Pin);
+        LED_ON(LED_RED_Pin);
+        uart_send_text("[CAPTURE_START_FAIL] sai=SAI2A\r\n");
+        return false;
+    }
+
     HAL_Delay(100U);
     emit_pin_and_dma_diag();
 
-    /*
-     * Completar aproximadamente 3 s de pre-roll total antes de guardar audio.
-     */
     HAL_Delay(2800U);
 
-    /*
-     * Comenzar ahora el segundo que realmente se guarda.
-     */
     s_frames_captured = 0U;
     s_raw_nonzero_slot0 = 0U;
     s_raw_nonzero_slot1 = 0U;
@@ -434,7 +456,13 @@ static bool capture_exact_second(void)
 
     s_capture_active = false;
 
-    if (HAL_SAI_DMAStop(&hsai_BlockA2) != HAL_OK)
+    const HAL_StatusTypeDef stop_b =
+        HAL_SAI_DMAStop(&hsai_BlockB2);
+
+    const HAL_StatusTypeDef stop_a =
+        HAL_SAI_DMAStop(&hsai_BlockA2);
+
+    if ((stop_b != HAL_OK) || (stop_a != HAL_OK))
     {
         LED_OFF(LED_GREEN_Pin);
         LED_ON(LED_RED_Pin);
@@ -595,12 +623,13 @@ int main(void)
     LED_OFF(LED_BLUE_Pin);
 
     uart_send_text(
-        "\r\n[BOOT] BasicSetupMics P0.2c "
-        "single-mic SAI2A PI6 GPIO-IDR DMA diag\r\n"
+        "\r\n[BOOT] BasicSetUpMics2Pairs F3.1 "
+        "SAI2B PG10 GPIO-IDR DMA diag\r\n"
     );
 
     uart_send_text(
-        "[WIRING] BCLK=PI5 WS=PI7 DOUT=PI6 PG10=unused SEL=VDD\r\n"
+        "[WIRING] BCLK=PI5 WS=PI7 DOUT=PG10 "
+        "PI6=unused clock_master=SAI2A capture=SAI2B\r\n"
     );
 
     while (1)

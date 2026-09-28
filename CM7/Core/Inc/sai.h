@@ -16,6 +16,7 @@
   *
   ******************************************************************************
   */
+
 #ifndef __SAI_H__
 #define __SAI_H__
 
@@ -26,7 +27,10 @@ extern "C" {
 #include "main.h"
 
 extern SAI_HandleTypeDef hsai_BlockA2;
+extern SAI_HandleTypeDef hsai_BlockB2;
+
 extern DMA_HandleTypeDef hdma_sai2_a;
+extern DMA_HandleTypeDef hdma_sai2_b;
 
 void MX_SAI2_Init(void);
 

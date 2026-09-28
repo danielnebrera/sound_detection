@@ -6,4 +6,7 @@ void MX_DMA_Init(void)
 
     HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0U, 0U);
     HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+
+    HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 0U, 0U);
+    HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
 }
