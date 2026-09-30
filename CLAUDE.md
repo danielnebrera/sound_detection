@@ -10,7 +10,7 @@ Dual-core firmware for the **Arduino Portenta H7** (STM32H747XIHx — Cortex-M7 
 
 This project uses **STM32CubeIDE** (Eclipse CDT + GCC `arm-none-eabi`). There is no standalone Makefile — builds are IDE-managed.
 
-- Open `Portenta_H7_BlinkingLED.ioc` in STM32CubeMX to regenerate peripheral init code.
+- Open `SoundDetection.ioc` in STM32CubeMX to regenerate peripheral init code.
 - Build each core as a separate project inside CubeIDE: **CM4** and **CM7** compile and link independently.
 - Linker scripts per core: `STM32H747XIHX_FLASH.ld` (production) and `STM32H747XIHX_RAM.ld` (debug RAM execution).
 - Optimization: `-O2` for Release builds.
@@ -21,8 +21,8 @@ Two separate debug sessions must be launched — one per core:
 
 | Core | Launch file | Interface |
 |------|-------------|-----------|
-| CM7  | `CM7/Portenta_H7_BlinkingLED_CM7.launch` + `.cfg` | OpenOCD + STM32-STLINK-V3, GDB port 3333 |
-| CM4  | `CM4/Portenta_H7_BlinkingLED_CM4 Debug.launch` | ST-LINK GDB Server, access port AP3, GDB port 61234 |
+| CM7  | `CM7/SoundDetection_CM7.launch` + `.cfg` | OpenOCD + STM32-STLINK-V3, GDB port 3333 |
+| CM4  | `CM4/SoundDetection_CM4 Debug.launch` | ST-LINK GDB Server, access port AP3, GDB port 61234 |
 
 CM7 must be flashed/started first — it is the master that wakes CM4 via HSEM.
 

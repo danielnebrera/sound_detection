@@ -1,7 +1,7 @@
 # File Tree: CM7
 
 **Generated:** 5/24/2026, 2:07:28 PM
-**Root Path:** `c:\Users\jaene\Desktop\ModeloLocalizacion\DOC SetUp\DOC SetUp\Portenta_H7_BlinkingLED\CM7`
+**Root Path:** `c:\Users\jaene\Desktop\ModeloLocalizacion\DOC SetUp\DOC SetUp\SoundDetection\CM7`
 
 ```
 ├── 📁 .settings
@@ -597,8 +597,8 @@
 │   │       │   ├── 📄 stm32h7xx_ll_utils.su
 │   │       │   └── 📄 subdir.mk
 │   │       └── 📄 subdir.mk
-│   ├── 📄 Portenta_H7_BlinkingLED_CM7.elf
-│   ├── 📄 Portenta_H7_BlinkingLED_CM7.list
+│   ├── 📄 SoundDetection_CM7.elf
+│   ├── 📄 SoundDetection_CM7.list
 │   ├── 📄 makefile
 │   ├── 📄 objects.list
 │   ├── 📄 objects.mk
@@ -868,8 +868,8 @@
 │           └── 📄 stm32h7xx_ll_utils.c
 ├── ⚙️ .cproject
 ├── ⚙️ .project
-├── 📄 Portenta_H7_BlinkingLED_CM7.cfg
-├── 📄 Portenta_H7_BlinkingLED_CM7.launch
+├── 📄 SoundDetection_CM7.cfg
+├── 📄 SoundDetection_CM7.launch
 ├── 📄 STM32H747XIHX_FLASH.ld
 └── 📄 STM32H747XIHX_RAM.ld
 ```

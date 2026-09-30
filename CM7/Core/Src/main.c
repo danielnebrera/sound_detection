@@ -102,7 +102,7 @@ typedef struct
 static SaiDmaDiagSnapshot s_diag_pre_start;
 static SaiDmaDiagSnapshot s_diag_after_start;
 static SaiDmaDiagSnapshot s_diag_after_stop;
-
+static void uart_send(const char *text);
 static void sai_dma_diag_snapshot(SaiDmaDiagSnapshot *snapshot)
 {
     if (snapshot == NULL)
