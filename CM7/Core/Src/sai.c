@@ -37,11 +37,10 @@ void MX_SAI2_Init(void)
     hsai_BlockB2.Init.NoDivider = SAI_MASTERDIVIDER_ENABLE;
     hsai_BlockB2.Init.MckOverSampling = SAI_MCK_OVERSAMPLING_DISABLE;
     hsai_BlockB2.Init.FIFOThreshold = SAI_FIFOTHRESHOLD_EMPTY;
-    hsai_BlockB2.Init.AudioFrequency = SAI_AUDIO_FREQUENCY_44K;
     hsai_BlockB2.Init.SynchroExt = SAI_SYNCEXT_DISABLE;
     hsai_BlockB2.Init.MonoStereoMode = SAI_STEREOMODE;
     hsai_BlockB2.Init.CompandingMode = SAI_NOCOMPANDING;
-    hsai_BlockB2.Init.TriState = SAI_OUTPUT_NOTRELEASED;
+    hsai_BlockB2.Init.TriState = SAI_OUTPUT_RELEASED;
 
     if (HAL_SAI_InitProtocol(
             &hsai_BlockB2,
@@ -62,11 +61,16 @@ void HAL_SAI_MspInit(SAI_HandleTypeDef *saiHandle)
         __HAL_RCC_SAI2_CLK_ENABLE();
         __HAL_RCC_GPIOI_CLK_ENABLE();
 
-        GPIO_InitStruct.Pin = GPIO_PIN_5 | GPIO_PIN_7;
+        GPIO_InitStruct.Pin =
+            GPIO_PIN_5 |
+            GPIO_PIN_6 |
+            GPIO_PIN_7;
+
         GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
         GPIO_InitStruct.Pull = GPIO_NOPULL;
         GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
         GPIO_InitStruct.Alternate = GPIO_AF10_SAI2;
+
         HAL_GPIO_Init(GPIOI, &GPIO_InitStruct);
 
         hdma_sai2_a.Instance = DMA1_Stream0;
@@ -97,6 +101,7 @@ void HAL_SAI_MspInit(SAI_HandleTypeDef *saiHandle)
         GPIO_InitStruct.Pull = GPIO_NOPULL;
         GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
         GPIO_InitStruct.Alternate = GPIO_AF10_SAI2;
+
         HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
 
         hdma_sai2_b.Instance = DMA1_Stream1;
@@ -125,7 +130,9 @@ void HAL_SAI_MspDeInit(SAI_HandleTypeDef *saiHandle)
     {
         HAL_GPIO_DeInit(
             GPIOI,
-            GPIO_PIN_5 | GPIO_PIN_7
+            GPIO_PIN_5 |
+            GPIO_PIN_6 |
+            GPIO_PIN_7
         );
 
         HAL_DMA_DeInit(saiHandle->hdmarx);
