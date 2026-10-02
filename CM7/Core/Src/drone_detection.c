@@ -36,6 +36,7 @@
 #include "drone_detection.h"
 #include "mfcc_stm32.h"
 #include "model_runner_stm32.h"
+#include "stm32h7xx_hal.h"
 
 #include <math.h>
 #include <stdbool.h>
@@ -197,6 +198,55 @@ static uint8_t s_far_streak = 0U;
 static uint8_t s_alert_hold = 0U;
 
 static DroneDetectionResult s_last_result = {0};
+static DroneDetectionProfile s_profile = {0};
+
+static void profile_counter_init(void)
+{
+    if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U)
+    {
+        CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+        DWT->CYCCNT = 0U;
+        DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    }
+}
+
+static inline uint32_t profile_cycles(void)
+{
+    return DWT->CYCCNT;
+}
+
+static void profile_update_max(
+    uint32_t *maximum,
+    uint32_t value)
+{
+    if (value > *maximum)
+    {
+        *maximum = value;
+    }
+}
+
+static void profile_reset_channel_last(uint32_t channel)
+{
+    s_profile.preprocess_last_cycles[channel] = 0U;
+    s_profile.mfcc_last_cycles[channel] = 0U;
+    s_profile.tflite_last_cycles[channel] = 0U;
+    s_profile.total_last_cycles[channel] = 0U;
+}
+
+static void profile_finish_channel(
+    uint32_t channel,
+    uint32_t start_cycles)
+{
+    const uint32_t elapsed =
+        profile_cycles() - start_cycles;
+
+    s_profile.total_last_cycles[channel] = elapsed;
+
+    profile_update_max(
+        &s_profile.total_max_cycles[channel],
+        elapsed
+    );
+}
 
 static void update_last_result(
     float fused_probability,
@@ -329,8 +379,11 @@ bool drone_detection_init(void)
         (unsigned)BASELINE_CAL_WINDOWS
     );
 
+    profile_counter_init();
+
     memset(s_work_buffer, 0, sizeof(s_work_buffer));
     memset(&s_mfcc, 0, sizeof(s_mfcc));
+    memset(&s_profile, 0, sizeof(s_profile));
 
     memset(
         s_hpf_previous_input,
@@ -425,6 +478,14 @@ static void process_channel(
     uint32_t channel,
     const int16_t *source)
 {
+    const uint32_t channel_start_cycles =
+        profile_cycles();
+
+    profile_reset_channel_last(channel);
+
+    const uint32_t preprocess_start_cycles =
+        profile_cycles();
+
     load_pcm16_channel_into_work_buffer(channel, source);
 
     /*
@@ -438,6 +499,17 @@ static void process_channel(
             SAMPLES_PER_SECOND
         );
 
+    const uint32_t preprocess_elapsed =
+        profile_cycles() - preprocess_start_cycles;
+
+    s_profile.preprocess_last_cycles[channel] =
+        preprocess_elapsed;
+
+    profile_update_max(
+        &s_profile.preprocess_max_cycles[channel],
+        preprocess_elapsed
+    );
+
     s_probability[channel] = 0.0f;
     s_valid[channel] = false;
     s_acoustic_active[channel] = false;
@@ -449,34 +521,102 @@ static void process_channel(
      */
     if (!s_baseline_ready)
     {
+        profile_finish_channel(
+            channel,
+            channel_start_cycles
+        );
         return;
     }
 
     s_delta_dbfs[channel] =
         s_dbfs[channel] - s_baseline_dbfs[channel];
 
+    s_profile.gate_last_dbfs[channel] =
+        s_dbfs[channel];
+    s_profile.gate_last_delta_db[channel] =
+        s_delta_dbfs[channel];
+
+    if ((s_profile.gate_windows[channel] == 0U) ||
+        (s_delta_dbfs[channel] >
+         s_profile.gate_max_delta_db[channel]))
+    {
+        s_profile.gate_max_delta_db[channel] =
+            s_delta_dbfs[channel];
+    }
+
+    s_profile.gate_windows[channel]++;
+
     if (s_delta_dbfs[channel] <
         s_activity_margin_db[channel])
     {
+        profile_finish_channel(
+            channel,
+            channel_start_cycles
+        );
         return;
     }
 
     s_acoustic_active[channel] = true;
+    s_profile.gate_active_count[channel]++;
 
-    if (!mfcc_stm32_compute(
+    const uint32_t mfcc_start_cycles =
+        profile_cycles();
+
+    const bool mfcc_ok =
+        mfcc_stm32_compute(
             s_work_buffer,
             &s_mfcc
-        ))
+        );
+
+    const uint32_t mfcc_elapsed =
+        profile_cycles() - mfcc_start_cycles;
+
+    s_profile.mfcc_last_cycles[channel] =
+        mfcc_elapsed;
+
+    profile_update_max(
+        &s_profile.mfcc_max_cycles[channel],
+        mfcc_elapsed
+    );
+
+    s_profile.mfcc_runs[channel]++;
+
+    if (!mfcc_ok)
     {
+        profile_finish_channel(
+            channel,
+            channel_start_cycles
+        );
         return;
     }
 
     s_valid[channel] = true;
 
+    const uint32_t tflite_start_cycles =
+        profile_cycles();
+
     s_probability[channel] =
         model_runner_infer(
             s_mfcc.data
         );
+
+    const uint32_t tflite_elapsed =
+        profile_cycles() - tflite_start_cycles;
+
+    s_profile.tflite_last_cycles[channel] =
+        tflite_elapsed;
+
+    profile_update_max(
+        &s_profile.tflite_max_cycles[channel],
+        tflite_elapsed
+    );
+
+    s_profile.tflite_runs[channel]++;
+
+    profile_finish_channel(
+        channel,
+        channel_start_cycles
+    );
 }
 
 static bool update_frozen_baseline(void)
@@ -491,6 +631,9 @@ static bool update_frozen_baseline(void)
          channel++)
     {
         s_calibration_dbfs[channel][s_calibration_count] =
+            s_dbfs[channel];
+
+        s_profile.calibration_dbfs[channel][s_calibration_count] =
             s_dbfs[channel];
     }
 
@@ -521,6 +664,11 @@ static bool update_frozen_baseline(void)
                 s_calibration_dbfs[channel][1],
                 s_calibration_dbfs[channel][2]
             );
+
+        s_profile.gate_baseline_dbfs[channel] =
+            s_baseline_dbfs[channel];
+        s_profile.gate_margin_db[channel] =
+            s_activity_margin_db[channel];
     }
 
     s_baseline_ready = true;
@@ -610,6 +758,9 @@ bool drone_detection_process_window(const RecorderChunkView *window)
         }
     }
 
+    const uint32_t window_start_cycles =
+        profile_cycles();
+
     process_channel(CHANNEL_MIC2, window->channel[CHANNEL_MIC2]);
     process_channel(CHANNEL_MIC4, window->channel[CHANNEL_MIC4]);
     process_channel(CHANNEL_MIC3, window->channel[CHANNEL_MIC3]);
@@ -618,6 +769,18 @@ bool drone_detection_process_window(const RecorderChunkView *window)
     if (!update_frozen_baseline())
     {
         update_last_result(0.0f, 0U);
+
+        const uint32_t window_elapsed =
+            profile_cycles() - window_start_cycles;
+
+        s_profile.window_last_cycles = window_elapsed;
+
+        profile_update_max(
+            &s_profile.window_max_cycles,
+            window_elapsed
+        );
+
+        s_profile.windows_profiled++;
         return true;
     }
 
@@ -799,6 +962,18 @@ bool drone_detection_process_window(const RecorderChunkView *window)
 
     update_last_result(p_fused, alert_level);
 
+    const uint32_t window_elapsed =
+        profile_cycles() - window_start_cycles;
+
+    s_profile.window_last_cycles = window_elapsed;
+
+    profile_update_max(
+        &s_profile.window_max_cycles,
+        window_elapsed
+    );
+
+    s_profile.windows_profiled++;
+
     DET_LOG(
         "[DET4] "
         "M1:%5.1f b=%5.1f d=%4.1f A=%u p=%.2f | "
@@ -856,5 +1031,16 @@ bool drone_detection_get_last_result(DroneDetectionResult *result)
     }
 
     *result = s_last_result;
+    return true;
+}
+
+bool drone_detection_get_profile(DroneDetectionProfile *profile)
+{
+    if (profile == NULL)
+    {
+        return false;
+    }
+
+    *profile = s_profile;
     return true;
 }

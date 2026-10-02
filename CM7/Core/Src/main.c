@@ -538,6 +538,117 @@ static void emit_live_detection(
 #endif
 }
 
+static void emit_detection_profile(void)
+{
+    DroneDetectionProfile profile = {0};
+
+    if (!drone_detection_get_profile(&profile))
+    {
+        uart_send("[P1_PROFILE_FAIL]\r\n");
+        return;
+    }
+
+    for (uint32_t channel = 0U;
+         channel < RECORD_CHANNELS;
+         channel++)
+    {
+        char message[224];
+
+        snprintf(
+            message,
+            sizeof(message),
+            "[P1_CH%lu] "
+            "pre_last_us=%lu pre_max_us=%lu "
+            "mfcc_last_us=%lu mfcc_max_us=%lu mfcc_runs=%lu "
+            "tflite_last_us=%lu tflite_max_us=%lu tflite_runs=%lu "
+            "total_last_us=%lu total_max_us=%lu\r\n",
+            (unsigned long)channel,
+            (unsigned long)cycles_to_microseconds(
+                profile.preprocess_last_cycles[channel]
+            ),
+            (unsigned long)cycles_to_microseconds(
+                profile.preprocess_max_cycles[channel]
+            ),
+            (unsigned long)cycles_to_microseconds(
+                profile.mfcc_last_cycles[channel]
+            ),
+            (unsigned long)cycles_to_microseconds(
+                profile.mfcc_max_cycles[channel]
+            ),
+            (unsigned long)profile.mfcc_runs[channel],
+            (unsigned long)cycles_to_microseconds(
+                profile.tflite_last_cycles[channel]
+            ),
+            (unsigned long)cycles_to_microseconds(
+                profile.tflite_max_cycles[channel]
+            ),
+            (unsigned long)profile.tflite_runs[channel],
+            (unsigned long)cycles_to_microseconds(
+                profile.total_last_cycles[channel]
+            ),
+            (unsigned long)cycles_to_microseconds(
+                profile.total_max_cycles[channel]
+            )
+        );
+
+        uart_send(message);
+    }
+
+    for (uint32_t channel = 0U;
+         channel < RECORD_CHANNELS;
+         channel++)
+    {
+        char message[256];
+
+        snprintf(
+            message,
+            sizeof(message),
+            "[P1_CAL_CH%lu] c0_dbfs=%.2f c1_dbfs=%.2f c2_dbfs=%.2f baseline_dbfs=%.2f\r\n",
+            (unsigned long)channel,
+            (double)profile.calibration_dbfs[channel][0],
+            (double)profile.calibration_dbfs[channel][1],
+            (double)profile.calibration_dbfs[channel][2],
+            (double)profile.gate_baseline_dbfs[channel]
+        );
+
+        uart_send(message);
+
+        snprintf(
+            message,
+            sizeof(message),
+            "[P1_GATE_CH%lu] margin_db=%.2f last_dbfs=%.2f last_delta_db=%.2f max_delta_db=%.2f gate_windows=%lu active_count=%lu\r\n",
+            (unsigned long)channel,
+            (double)profile.gate_margin_db[channel],
+            (double)profile.gate_last_dbfs[channel],
+            (double)profile.gate_last_delta_db[channel],
+            (double)profile.gate_max_delta_db[channel],
+            (unsigned long)profile.gate_windows[channel],
+            (unsigned long)profile.gate_active_count[channel]
+        );
+
+        uart_send(message);
+    }
+
+    {
+        char message[160];
+
+        snprintf(
+            message,
+            sizeof(message),
+            "[P1_WINDOW] last_us=%lu max_us=%lu windows=%lu\r\n",
+            (unsigned long)cycles_to_microseconds(
+                profile.window_last_cycles
+            ),
+            (unsigned long)cycles_to_microseconds(
+                profile.window_max_cycles
+            ),
+            (unsigned long)profile.windows_profiled
+        );
+
+        uart_send(message);
+    }
+}
+
 static void stop_with_error(const char *message)
 {
     audio_recorder_disarm_stop_receiver();
@@ -806,6 +917,8 @@ int main(void)
         );
         uart_send(message);
     }
+
+    emit_detection_profile();
 
     if (recorded_chunks == 0U)
     {
