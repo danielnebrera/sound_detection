@@ -23,10 +23,10 @@
 #define TARGET_FRAMES MFCC_TARGET_FRAMES
 
 /* Buffers FFT separados - arm_rfft_fast_f32 requiere src != dst. */
-__attribute__((section(".RAM_D2_dsp"), aligned(32)))
+__attribute__((section(".DTCM_dsp"), aligned(32)))
 static float s_fft_in[N_FFT];
 
-__attribute__((section(".RAM_D2_dsp"), aligned(32)))
+__attribute__((section(".DTCM_dsp"), aligned(32)))
 static float s_fft_out[2 * N_FFT];
 
 /* DSP scratch in DTCM keeps large temporary arrays off the stack. */

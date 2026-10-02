@@ -446,7 +446,86 @@ Build desde cero      : validado
 
 ---
 
-## 18. Conclusión
+## 18. Optimización de rendimiento TFLite
+
+Se añadió un perfilador `P1` para medir por separado el tiempo de:
+
+```text
+preprocesamiento
+MFCC
+TFLite
+```
+
+El perfilado permitió identificar a TFLite como el principal cuello de botella inicial.
+
+La configuración de compilación validada actualmente es:
+
+```text
+C   = -O3
+C++ = -O2
+```
+
+Durante esta optimización se mantuvieron sin cambios:
+
+```text
+modelo
+MFCC matemáticamente
+gate
+thresholds
+lógica del profiler P1
+```
+
+También se probó `C++ = -O3`, pero se descartó porque el firmware excedía la región FLASH disponible.
+
+Con `C++ = -O2`, la sesión 1086 confirmó una mejora importante:
+
+```text
+TFLite antes (-Os) : ~408.8 ms por inferencia
+TFLite ahora (-O2) : ~122.9 ms por inferencia
+Mejora              : ~3.3x más rápido
+```
+
+El tiempo máximo de detección de una ventana completa de 4 canales pasó aproximadamente de:
+
+```text
+~2.23 s -> ~1.08 s
+```
+
+Posteriormente se realizó la prueba P3, moviendo únicamente los buffers temporales de FFT desde `RAM_D2` hacia `DTCM`, sin modificar la matemática del MFCC ni la lógica del detector.
+
+La sesión 1088 validó el resultado:
+
+```text
+MFCC antes (RAM_D2) : ~120.7 ms
+MFCC ahora (DTCM)   : ~42.9 ms
+Mejora              : ~2.8x más rápido
+
+Ventana 4 canales:
+~1.085 s -> ~0.769 s
+```
+
+TFLite se mantuvo prácticamente igual (~122.9 ms), confirmando que la mejora provino del cambio de ubicación de los buffers FFT.
+
+La detección, calibración, gate, probabilidades, EMA y alertas continuaron funcionando correctamente.
+
+---
+
+## 19. Próximos pasos
+
+- [x] Implementar perfilado P1 para separar preprocesamiento, MFCC y TFLite.
+- [x] Identificar TFLite como principal cuello de botella.
+- [x] Probar `C++ = -O3` y descartar por overflow de FLASH.
+- [x] Validar `C++ = -O2` manteniendo `C = -O3`.
+- [x] Añadir telemetría P1-GATE para validar calibración y activación del gate.
+- [x] Validar detección completa con 4 canales activos en la sesión 1086.
+- [x] Mover los buffers temporales de FFT desde `RAM_D2` hacia `DTCM`.
+- [x] Medir nuevamente MFCC y el tiempo total de detección después del cambio.
+- [x] Mantener modelo, gate, thresholds y lógica matemática sin cambios durante la prueba P3.
+- [ ] Identificar el siguiente cuello de botella manteniendo una sola variable por prueba.
+
+---
+
+## 20. Conclusión
 
 `SoundDetection` constituye la base limpia del proyecto principal de captura y detección de audio sobre STM32H747XI.
 
@@ -467,4 +546,4 @@ SAI2A = MASTER_RX / ASYNCHRONOUS
 SAI2B = SLAVE_RX  / SYNCHRONOUS
 ```
 
-La versión v2.1.7 fue nuevamente validada después de corregir el cableado físico y sirve como base estable para las siguientes etapas del proyecto.
+La versión v2.1.7 fue nuevamente validada después de corregir el cableado físico y actualmente incorpora el perfilado de rendimiento y la optimización `C++ = -O2` como base para las siguientes etapas del proyecto.
