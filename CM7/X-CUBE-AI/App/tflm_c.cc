@@ -29,7 +29,7 @@
 
 // if (=0), resolver is created with all built-in operators
 #if !defined(TFLM_RUNTIME_USE_ALL_OPERATORS)
-#define TFLM_RUNTIME_USE_ALL_OPERATORS 1
+#define TFLM_RUNTIME_USE_ALL_OPERATORS 0
 #endif
 
 #if defined(TFLM_RUNTIME_USE_ALL_OPERATORS) && TFLM_RUNTIME_USE_ALL_OPERATORS == 1
@@ -353,30 +353,15 @@ TfLiteStatus tflm_c_create(const uint8_t *model_data,
 #if defined(TFLM_RUNTIME_USE_ALL_OPERATORS) && TFLM_RUNTIME_USE_ALL_OPERATORS == 1
   static tflite::AllOpsResolver _resolver;
 #else
-  static tflite::MicroMutableOpResolver<23> _resolver;
-  _resolver.AddAveragePool2D(tflite::Register_AVERAGE_POOL_2D_INT8());
-  _resolver.AddConv2D(tflite::Register_CONV_2D_INT8());
-  _resolver.AddDepthwiseConv2D(tflite::Register_DEPTHWISE_CONV_2D_INT8());
-  _resolver.AddFullyConnected(tflite::Register_FULLY_CONNECTED_INT8());
-  _resolver.AddReshape();
-  _resolver.AddMean();
-  _resolver.AddPad();
-  _resolver.AddLogistic();
-  _resolver.AddMaxPool2D(tflite::Register_MAX_POOL_2D_INT8()); // Register_MAX_POOL_2D_INT8
-  _resolver.AddResizeNearestNeighbor();
-  _resolver.AddResizeBilinear();
-  _resolver.AddTranspose();
-  _resolver.AddMul();
-  _resolver.AddSub();
+  static tflite::MicroMutableOpResolver<8> _resolver;
+  _resolver.AddConv2D();
+  _resolver.AddMaxPool2D();
   _resolver.AddShape();
-  _resolver.AddTransposeConv();
-  _resolver.AddPack();
-  _resolver.AddAdd();
-  _resolver.AddQuantize();
-  _resolver.AddDequantize();
   _resolver.AddStridedSlice();
-  _resolver.AddConcatenation();
-  _resolver.AddSoftmax(tflite::Register_SOFTMAX_INT8());
+  _resolver.AddPack();
+  _resolver.AddReshape();
+  _resolver.AddFullyConnected();
+  _resolver.AddLogistic();
  #endif
 
   CTfLiteInterpreterContext *ctx = new CTfLiteInterpreterContext(
