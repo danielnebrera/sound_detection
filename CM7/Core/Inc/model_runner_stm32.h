@@ -10,6 +10,25 @@
  * ================================================================= */
 
 #include <stdbool.h>
+#include <stdint.h>
+
+#define MODEL_RUNNER_TFLM_MAX_NODES 16U
+
+typedef struct
+{
+    const char *name;
+    uint32_t runs;
+    uint64_t total_cycles;
+    uint32_t last_cycles;
+    uint32_t max_cycles;
+} ModelRunnerTflmNodeProfile;
+
+typedef struct
+{
+    uint32_t invokes;
+    uint32_t node_count;
+    ModelRunnerTflmNodeProfile nodes[MODEL_RUNNER_TFLM_MAX_NODES];
+} ModelRunnerTflmProfile;
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,6 +48,9 @@ bool model_runner_init(void);
  *                   Retorna -1.0f si el modelo no está inicializado
  */
 float model_runner_infer(const float *mfcc_data);
+
+void model_runner_tflm_profile_reset(void);
+bool model_runner_tflm_profile_get(ModelRunnerTflmProfile *profile);
 
 #ifdef __cplusplus
 }

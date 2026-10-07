@@ -547,3 +547,205 @@ SAI2B = SLAVE_RX  / SYNCHRONOUS
 ```
 
 La versión v2.1.7 fue nuevamente validada después de corregir el cableado físico y actualmente incorpora el perfilado de rendimiento y la optimización `C++ = -O2` como base para las siguientes etapas del proyecto.
+
+---
+
+## 21. Optimización avanzada TFLite: P4-B, P4-D y P4-E1
+
+Después de la optimización de MFCC en P3, TFLite volvió a ser el principal cuello de botella del pipeline. A partir de este punto se mantuvo la metodología de cambiar una sola variable por prueba.
+
+### P4-B - Resolver mínimo de operadores
+
+Se reemplazó el resolver general por un `MicroMutableOpResolver<8>` con únicamente los operadores realmente utilizados por el modelo:
+
+```text
+Conv2D
+MaxPool2D
+Shape
+StridedSlice
+Pack
+Reshape
+FullyConnected
+Logistic
+```
+
+La sesión 1089 validó el funcionamiento completo del modelo con los 8 operadores. El tiempo de inferencia se mantuvo prácticamente igual, por lo que P4-B se considera una optimización de footprint, no de velocidad.
+
+Resultado principal:
+
+```text
+text antes de P4-B : 1,210,896 bytes
+text con P4-B       :   897,440 bytes
+reducción           :   313,456 bytes (~306 KiB)
+```
+
+La detección completa siguió funcionando con:
+
+```text
+queue_high = 1
+errors     = 0
+```
+
+### P4-C - `conv.cc` selectivo en `-O3`
+
+Se probó mantener `C++ = -O2` global y compilar únicamente `cmsis_nn/conv.cc` con `-O3`.
+
+La sesión 1090 mostró que el tiempo TFLite permaneció aproximadamente en:
+
+```text
+~122.8 ms
+```
+
+Por lo tanto, P4-C fue descartado como optimización de rendimiento. El cambio de nivel de optimización del translation unit por sí solo no produjo una mejora medible.
+
+### P4-D - Perfilado interno por nodo TFLite
+
+Se activó temporalmente el observer/profiler interno de TFLite Micro para medir cada nodo sin imprimir por UART durante la inferencia. Las métricas se acumularon en RAM y se emitieron únicamente al terminar la captura.
+
+La sesión 1091 midió 64 inferencias y 11 nodos:
+
+```text
+Nodo 0  CONV_2D          avg ~34.045 ms
+Nodo 1  MAX_POOL_2D      avg ~ 2.756 ms
+Nodo 2  CONV_2D          avg ~81.791 ms
+Nodo 3  MAX_POOL_2D      avg ~ 0.842 ms
+Nodo 4  SHAPE            avg ~ 0.000 ms
+Nodo 5  STRIDED_SLICE    avg ~ 0.004 ms
+Nodo 6  PACK             avg ~ 0.001 ms
+Nodo 7  RESHAPE          avg ~ 0.050 ms
+Nodo 8  FULLY_CONNECTED  avg ~ 3.026 ms
+Nodo 9  FULLY_CONNECTED  avg ~ 0.003 ms
+Nodo 10 LOGISTIC         avg ~ 0.001 ms
+```
+
+Los dos `Conv2D` consumían juntos aproximadamente:
+
+```text
+115.836 ms
+```
+
+sobre unos:
+
+```text
+122.5 ms
+```
+
+medidos dentro de TFLite, es decir, aproximadamente el 94.5 % del tiempo total de inferencia.
+
+Este resultado confirmó que la siguiente optimización debía centrarse directamente en la implementación float de `Conv2D`.
+
+### P4-E1 - Optimización del `reference_ops::Conv()` float
+
+El camino `float32` utilizado por el modelo ejecuta la convolución de referencia de TensorFlow Lite Micro. La implementación original recalculaba offsets multidimensionales para cada multiplicación dentro del bucle más interno.
+
+P4-E1 mantuvo sin cambios:
+
+```text
+modelo
+pesos
+orden de acumulación
+stride
+padding
+dilation
+activación
+MFCC
+gate
+thresholds
+```
+
+El cambio consistió únicamente en sustituir la indexación repetitiva mediante `Offset()` por aritmética directa de punteros y strides precalculados, manteniendo el mismo orden de cálculo:
+
+```text
+filter_y
+  -> filter_x
+     -> in_channel
+```
+
+La sesión 1092 validó una mejora importante:
+
+```text
+Conv2D #0 promedio : 34.045 ms -> 23.033 ms
+Conv2D #2 promedio : 81.791 ms -> 37.702 ms
+```
+
+Resultado conjunto de ambos Conv2D:
+
+```text
+115.836 ms -> 60.735 ms
+```
+
+lo que representa aproximadamente una reducción del 47.6 % en el tiempo combinado de convolución.
+
+El tiempo máximo de TFLite por canal pasó aproximadamente de:
+
+```text
+122.8 ms -> 67.6 ms
+```
+
+El tiempo máximo de detección de una ventana completa de 4 canales pasó de:
+
+```text
+767.7 ms -> 546.6 ms
+```
+
+manteniendo:
+
+```text
+queue_high = 1
+errors     = 0
+pair_skew  = 1
+64 JSON de audio
+16 órdenes completas
+4 canales activos
+```
+
+Comparado con la referencia anterior a estas optimizaciones:
+
+```text
+sesión 1081 : detect_us_max ~2.227 s
+sesión 1092 : detect_us_max ~0.547 s
+```
+
+La reducción acumulada de latencia máxima es aproximadamente del 75.5 %, equivalente a unas 4.1 veces más velocidad que la referencia inicial.
+
+P4-E1 queda validado como parte de la nueva base del proyecto.
+
+### Base validada actual
+
+```text
+C                  = -O3
+C++                = -O2
+FFT temporal       = DTCM
+TFLM resolver      = MicroMutableOpResolver<8>
+Conv2D float       = reference_ops::Conv() optimizado con punteros/strides
+queue_high         = 1
+errors             = 0
+caches             = sin cambios / no habilitadas
+```
+
+---
+
+## 22. Próximo paso: geometría de los dos Conv2D
+
+Antes de especializar más la implementación de convolución en P4-E2, se medirá y documentará la geometría exacta de ambos nodos `Conv2D`:
+
+```text
+input H x W x C
+filter H x W x C
+output H x W x C
+stride
+padding
+dilation
+groups
+```
+
+El objetivo es determinar si ambos nodos pueden beneficiarse de una ruta especializada sin cambiar la matemática del modelo.
+
+La metodología se mantiene:
+
+```text
+una sola variable por prueba
+medición antes de optimizar
+sin cambios en modelo ni lógica de detección
+sin UART durante la fase crítica de captura
+```

@@ -42,14 +42,17 @@ inline void Conv(const ConvParams& params, const RuntimeShape& input_shape,
   TFLITE_DCHECK_EQ(filter_shape.DimensionsCount(), 4);
   TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
 
-  (void)im2col_data;   // only used in optimized code.
-  (void)im2col_shape;  // only used in optimized code.
+  (void)im2col_data;
+  (void)im2col_shape;
+
   const int batches = MatchingDim(input_shape, 0, output_shape, 0);
   const int input_depth = input_shape.Dims(3);
   const int output_depth = MatchingDim(filter_shape, 0, output_shape, 3);
+
   if (bias_data) {
     TFLITE_DCHECK_EQ(bias_shape.FlatSize(), output_depth);
   }
+
   const int input_height = input_shape.Dims(1);
   const int input_width = input_shape.Dims(2);
   const int filter_height = filter_shape.Dims(1);
@@ -63,46 +66,76 @@ inline void Conv(const ConvParams& params, const RuntimeShape& input_shape,
   const int output_height = output_shape.Dims(1);
   const int output_width = output_shape.Dims(2);
 
+  const int input_row_stride = input_width * input_depth;
+  const int input_batch_stride = input_height * input_row_stride;
+  const int filter_x_stride = filter_input_depth;
+  const int filter_y_stride = filter_width * filter_x_stride;
+  const int filter_channel_stride = filter_height * filter_y_stride;
+  const int output_row_stride = output_width * output_depth;
+  const int output_batch_stride = output_height * output_row_stride;
+
   for (int batch = 0; batch < batches; ++batch) {
+    const float* input_batch = input_data + batch * input_batch_stride;
+    float* output_batch = output_data + batch * output_batch_stride;
+
     for (int out_y = 0; out_y < output_height; ++out_y) {
       const int in_y_origin = (out_y * stride_height) - pad_height;
+      float* output_row = output_batch + out_y * output_row_stride;
+
       for (int out_x = 0; out_x < output_width; ++out_x) {
         const int in_x_origin = (out_x * stride_width) - pad_width;
+        float* output_pixel = output_row + out_x * output_depth;
+
         for (int out_channel = 0; out_channel < output_depth; ++out_channel) {
-          auto group = out_channel / filters_per_group;
-          float total = 0.f;
+          const int group = out_channel / filters_per_group;
+          const int input_channel_base = group * filter_input_depth;
+          const float* filter_channel =
+              filter_data + out_channel * filter_channel_stride;
+
+          float total = 0.0f;
+
           for (int filter_y = 0; filter_y < filter_height; ++filter_y) {
-            const int in_y = in_y_origin + dilation_height_factor * filter_y;
+            const int in_y =
+                in_y_origin + dilation_height_factor * filter_y;
+
+            if ((in_y < 0) || (in_y >= input_height)) {
+              continue;
+            }
+
+            const float* input_row =
+                input_batch + in_y * input_row_stride;
+            const float* filter_row =
+                filter_channel + filter_y * filter_y_stride;
+
             for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
-              const int in_x = in_x_origin + dilation_width_factor * filter_x;
+              const int in_x =
+                  in_x_origin + dilation_width_factor * filter_x;
 
-              // Zero padding by omitting the areas outside the image.
-              const bool is_point_inside_image =
-                  (in_x >= 0) && (in_x < input_width) && (in_y >= 0) &&
-                  (in_y < input_height);
-
-              if (!is_point_inside_image) {
+              if ((in_x < 0) || (in_x >= input_width)) {
                 continue;
               }
-              for (int in_channel = 0; in_channel < filter_input_depth;
+
+              const float* input_ptr =
+                  input_row + in_x * input_depth + input_channel_base;
+              const float* filter_ptr =
+                  filter_row + filter_x * filter_x_stride;
+
+              for (int in_channel = 0;
+                   in_channel < filter_input_depth;
                    ++in_channel) {
-                float input_value =
-                    input_data[Offset(input_shape, batch, in_y, in_x,
-                                      in_channel + group * filter_input_depth)];
-                float filter_value = filter_data[Offset(
-                    filter_shape, out_channel, filter_y, filter_x, in_channel)];
-                total += (input_value * filter_value);
+                total += input_ptr[in_channel] * filter_ptr[in_channel];
               }
             }
           }
-          float bias_value = 0.0f;
-          if (bias_data) {
-            bias_value = bias_data[out_channel];
-          }
-          output_data[Offset(output_shape, batch, out_y, out_x, out_channel)] =
-              ActivationFunctionWithMinMax(total + bias_value,
-                                           output_activation_min,
-                                           output_activation_max);
+
+          const float bias_value =
+              bias_data ? bias_data[out_channel] : 0.0f;
+
+          output_pixel[out_channel] =
+              ActivationFunctionWithMinMax(
+                  total + bias_value,
+                  output_activation_min,
+                  output_activation_max);
         }
       }
     }
