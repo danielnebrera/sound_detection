@@ -74,6 +74,71 @@ inline void Conv(const ConvParams& params, const RuntimeShape& input_shape,
   const int output_row_stride = output_width * output_depth;
   const int output_batch_stride = output_height * output_row_stride;
 
+  const bool p4e2_valid_3x3 =
+      (batches == 1) &&
+      (groups == 1) &&
+      (filter_height == 3) &&
+      (filter_width == 3) &&
+      (stride_height == 1) &&
+      (stride_width == 1) &&
+      (dilation_height_factor == 1) &&
+      (dilation_width_factor == 1) &&
+      (pad_height == 0) &&
+      (pad_width == 0) &&
+      (output_height == (input_height - 2)) &&
+      (output_width == (input_width - 2));
+
+  if (p4e2_valid_3x3) {
+    for (int out_y = 0; out_y < output_height; ++out_y) {
+      float* output_row = output_data + out_y * output_row_stride;
+
+      for (int out_x = 0; out_x < output_width; ++out_x) {
+        float* output_pixel = output_row + out_x * output_depth;
+        const float* input_origin =
+            input_data + out_y * input_row_stride + out_x * input_depth;
+
+        for (int out_channel = 0;
+             out_channel < output_depth;
+             ++out_channel) {
+          const float* filter_channel =
+              filter_data + out_channel * filter_channel_stride;
+          float total = 0.0f;
+
+          for (int filter_y = 0; filter_y < 3; ++filter_y) {
+            const float* input_row =
+                input_origin + filter_y * input_row_stride;
+            const float* filter_row =
+                filter_channel + filter_y * filter_y_stride;
+
+            for (int filter_x = 0; filter_x < 3; ++filter_x) {
+              const float* input_ptr =
+                  input_row + filter_x * input_depth;
+              const float* filter_ptr =
+                  filter_row + filter_x * filter_input_depth;
+
+              for (int in_channel = 0;
+                   in_channel < filter_input_depth;
+                   ++in_channel) {
+                total += input_ptr[in_channel] * filter_ptr[in_channel];
+              }
+            }
+          }
+
+          const float bias_value =
+              bias_data ? bias_data[out_channel] : 0.0f;
+
+          output_pixel[out_channel] =
+              ActivationFunctionWithMinMax(
+                  total + bias_value,
+                  output_activation_min,
+                  output_activation_max);
+        }
+      }
+    }
+
+    return;
+  }
+
   for (int batch = 0; batch < batches; ++batch) {
     const float* input_batch = input_data + batch * input_batch_stride;
     float* output_batch = output_data + batch * output_batch_stride;
