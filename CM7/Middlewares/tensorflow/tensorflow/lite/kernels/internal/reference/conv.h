@@ -116,10 +116,29 @@ inline void Conv(const ConvParams& params, const RuntimeShape& input_shape,
               const float* filter_ptr =
                   filter_row + filter_x * filter_input_depth;
 
-              for (int in_channel = 0;
-                   in_channel < filter_input_depth;
-                   ++in_channel) {
-                total += input_ptr[in_channel] * filter_ptr[in_channel];
+              if (filter_input_depth == 16) {
+                total += input_ptr[0]  * filter_ptr[0];
+                total += input_ptr[1]  * filter_ptr[1];
+                total += input_ptr[2]  * filter_ptr[2];
+                total += input_ptr[3]  * filter_ptr[3];
+                total += input_ptr[4]  * filter_ptr[4];
+                total += input_ptr[5]  * filter_ptr[5];
+                total += input_ptr[6]  * filter_ptr[6];
+                total += input_ptr[7]  * filter_ptr[7];
+                total += input_ptr[8]  * filter_ptr[8];
+                total += input_ptr[9]  * filter_ptr[9];
+                total += input_ptr[10] * filter_ptr[10];
+                total += input_ptr[11] * filter_ptr[11];
+                total += input_ptr[12] * filter_ptr[12];
+                total += input_ptr[13] * filter_ptr[13];
+                total += input_ptr[14] * filter_ptr[14];
+                total += input_ptr[15] * filter_ptr[15];
+              } else {
+                for (int in_channel = 0;
+                     in_channel < filter_input_depth;
+                     ++in_channel) {
+                  total += input_ptr[in_channel] * filter_ptr[in_channel];
+                }
               }
             }
           }
