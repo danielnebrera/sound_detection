@@ -24,6 +24,85 @@ namespace tflite {
 
 namespace reference_ops {
 
+
+static __attribute__((noinline)) void Conv3x3Depth16P4E5(
+    const float* input_data, const float* filter_data,
+    const float* bias_data, float* output_data,
+    const float output_activation_min,
+    const float output_activation_max) {
+  constexpr int kInputRowStride = 9 * 16;
+  constexpr int kFilterChannelStride = 3 * 3 * 16;
+  constexpr int kOutputRowStride = 7 * 32;
+
+  for (int out_y = 0; out_y < 47; ++out_y) {
+    const float* row0 = input_data + out_y * kInputRowStride;
+    const float* row1 = row0 + kInputRowStride;
+    const float* row2 = row1 + kInputRowStride;
+    float* output_row = output_data + out_y * kOutputRowStride;
+
+    for (int out_x = 0; out_x < 7; ++out_x) {
+      const int x = out_x * 16;
+
+      const float* p00 = row0 + x;
+      const float* p01 = p00 + 16;
+      const float* p02 = p00 + 32;
+      const float* p10 = row1 + x;
+      const float* p11 = p10 + 16;
+      const float* p12 = p10 + 32;
+      const float* p20 = row2 + x;
+      const float* p21 = p20 + 16;
+      const float* p22 = p20 + 32;
+
+      float* output_pixel = output_row + out_x * 32;
+
+      for (int out_channel = 0; out_channel < 32; ++out_channel) {
+        const float* f =
+            filter_data + out_channel * kFilterChannelStride;
+        float total = 0.0f;
+
+#define P4E5_ACCUM16(P, F)                 \
+        total += (P)[0]  * (F)[0];         \
+        total += (P)[1]  * (F)[1];         \
+        total += (P)[2]  * (F)[2];         \
+        total += (P)[3]  * (F)[3];         \
+        total += (P)[4]  * (F)[4];         \
+        total += (P)[5]  * (F)[5];         \
+        total += (P)[6]  * (F)[6];         \
+        total += (P)[7]  * (F)[7];         \
+        total += (P)[8]  * (F)[8];         \
+        total += (P)[9]  * (F)[9];         \
+        total += (P)[10] * (F)[10];        \
+        total += (P)[11] * (F)[11];        \
+        total += (P)[12] * (F)[12];        \
+        total += (P)[13] * (F)[13];        \
+        total += (P)[14] * (F)[14];        \
+        total += (P)[15] * (F)[15]
+
+        P4E5_ACCUM16(p00, f + 0);
+        P4E5_ACCUM16(p01, f + 16);
+        P4E5_ACCUM16(p02, f + 32);
+        P4E5_ACCUM16(p10, f + 48);
+        P4E5_ACCUM16(p11, f + 64);
+        P4E5_ACCUM16(p12, f + 80);
+        P4E5_ACCUM16(p20, f + 96);
+        P4E5_ACCUM16(p21, f + 112);
+        P4E5_ACCUM16(p22, f + 128);
+
+#undef P4E5_ACCUM16
+
+        const float bias_value =
+            bias_data ? bias_data[out_channel] : 0.0f;
+
+        output_pixel[out_channel] =
+            ActivationFunctionWithMinMax(
+                total + bias_value,
+                output_activation_min,
+                output_activation_max);
+      }
+    }
+  }
+}
+
 inline void Conv(const ConvParams& params, const RuntimeShape& input_shape,
                  const float* input_data, const RuntimeShape& filter_shape,
                  const float* filter_data, const RuntimeShape& bias_shape,
@@ -87,6 +166,27 @@ inline void Conv(const ConvParams& params, const RuntimeShape& input_shape,
       (pad_width == 0) &&
       (output_height == (input_height - 2)) &&
       (output_width == (input_width - 2));
+
+  const bool p4e5_conv2 =
+      p4e2_valid_3x3 &&
+      (input_height == 49) &&
+      (input_width == 9) &&
+      (input_depth == 16) &&
+      (filter_input_depth == 16) &&
+      (output_height == 47) &&
+      (output_width == 7) &&
+      (output_depth == 32);
+
+  if (p4e5_conv2) {
+    Conv3x3Depth16P4E5(
+        input_data,
+        filter_data,
+        bias_data,
+        output_data,
+        output_activation_min,
+        output_activation_max);
+    return;
+  }
 
   if (p4e2_valid_3x3) {
     for (int out_y = 0; out_y < output_height; ++out_y) {

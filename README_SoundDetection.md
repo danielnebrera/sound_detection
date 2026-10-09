@@ -510,26 +510,37 @@ La detección, calibración, gate, probabilidades, EMA y alertas continuaron fun
 
 ---
 
-## 19. Próximos pasos
+## 19. Estado de optimización
 
-- [x] Implementar perfilado P1 para separar preprocesamiento, MFCC y TFLite.
-- [x] Identificar TFLite como principal cuello de botella.
-- [x] Probar `C++ = -O3` y descartar por overflow de FLASH.
-- [x] Validar `C++ = -O2` manteniendo `C = -O3`.
-- [x] Añadir telemetría P1-GATE para validar calibración y activación del gate.
-- [x] Validar detección completa con 4 canales activos en la sesión 1086.
-- [x] Mover los buffers temporales de FFT desde `RAM_D2` hacia `DTCM`.
-- [x] Medir nuevamente MFCC y el tiempo total de detección después del cambio.
-- [x] Mantener modelo, gate, thresholds y lógica matemática sin cambios durante la prueba P3.
-- [ ] Identificar el siguiente cuello de botella manteniendo una sola variable por prueba.
+La campaña de rendimiento mantiene la metodología de cambiar una sola variable por prueba y conservar como referencia la última versión validada.
+
+Estado actual:
+
+- [x] Perfilado P1 de preprocesamiento, MFCC y TFLite.
+- [x] `C = -O3`.
+- [x] `C++ = -O2`.
+- [x] `C++ = -O3` global descartado por overflow de FLASH.
+- [x] FFT temporal movida desde `RAM_D2` hacia `DTCM` en P3.
+- [x] Resolver TFLM mínimo de 8 operadores.
+- [x] Perfilado interno por nodo TFLite mediante P4-D.
+- [x] Optimización P4-E1 de punteros/strides.
+- [x] Especialización geométrica 3x3 en P4-E2.
+- [x] Desenrollado explícito de profundidad 16 en P4-E3.
+- [x] P4-E4 evaluado y descartado.
+- [x] Corrección MPU de FLASH validada como CACHE-0.
+- [x] I-Cache evaluada sin beneficio medible.
+- [x] D-Cache evaluada y descartada por regresión reproducible.
+- [x] P4-E5 validado con 64 inferencias.
+- [x] P4-D retirado de la versión de producción.
+- [ ] P5: optimización de MFCC.
 
 ---
 
-## 20. Conclusión
+## 20. Arquitectura validada actual
 
-`SoundDetection` constituye la base limpia del proyecto principal de captura y detección de audio sobre STM32H747XI.
+`SoundDetection` continúa siendo la base limpia de captura y detección de audio sobre STM32H747XI.
 
-La arquitectura de cuatro micrófonos queda formada por:
+Arquitectura de audio:
 
 ```text
 2 micrófonos -> PI6  / SAI2_SD_A
@@ -539,24 +550,47 @@ BCLK compartido -> PI5
 WS compartido   -> PI7
 ```
 
-con:
+Configuración SAI:
 
 ```text
 SAI2A = MASTER_RX / ASYNCHRONOUS
 SAI2B = SLAVE_RX  / SYNCHRONOUS
 ```
 
-La versión v2.1.7 fue nuevamente validada después de corregir el cableado físico y actualmente incorpora el perfilado de rendimiento y la optimización `C++ = -O2` como base para las siguientes etapas del proyecto.
+Captura:
+
+```text
+sample rate       = 44.1 kHz
+canales           = 4
+DMA               = habilitado
+SDRAM             = 8 MiB
+UART              = 1,000,000 baudios
+transferencia     = CRC32 + ACK/NACK
+queue_high        = 1
+errors            = 0
+```
+
+La captura DMA utiliza buffers ping-pong en D2 y el firmware copia posteriormente los datos al ring de SDRAM. La SDRAM no se utiliza como destino directo del DMA.
 
 ---
 
-## 21. Optimización avanzada TFLite: P4-B, P4-D y P4-E1
+## 21. Optimización avanzada TFLite: P4
 
-Después de la optimización de MFCC en P3, TFLite volvió a ser el principal cuello de botella del pipeline. A partir de este punto se mantuvo la metodología de cambiar una sola variable por prueba.
+Después de P3, TFLite volvió a ser el principal cuello de botella. La campaña P4 se centró en reducir el coste de inferencia sin cambiar:
 
-### P4-B - Resolver mínimo de operadores
+```text
+modelo
+pesos
+matemática del detector
+MFCC
+gate
+thresholds
+orden de acumulación de las convoluciones aceptadas
+```
 
-Se reemplazó el resolver general por un `MicroMutableOpResolver<8>` con únicamente los operadores realmente utilizados por el modelo:
+### P4-B - Resolver mínimo
+
+El modelo utiliza exactamente:
 
 ```text
 Conv2D
@@ -569,183 +603,453 @@ FullyConnected
 Logistic
 ```
 
-La sesión 1089 validó el funcionamiento completo del modelo con los 8 operadores. El tiempo de inferencia se mantuvo prácticamente igual, por lo que P4-B se considera una optimización de footprint, no de velocidad.
+Se validó `MicroMutableOpResolver<8>`.
 
 Resultado principal:
 
 ```text
 text antes de P4-B : 1,210,896 bytes
 text con P4-B       :   897,440 bytes
-reducción           :   313,456 bytes (~306 KiB)
+reducción           :   313,456 bytes
 ```
 
-La detección completa siguió funcionando con:
-
-```text
-queue_high = 1
-errors     = 0
-```
+P4-B se conserva principalmente como optimización de footprint.
 
 ### P4-C - `conv.cc` selectivo en `-O3`
 
-Se probó mantener `C++ = -O2` global y compilar únicamente `cmsis_nn/conv.cc` con `-O3`.
+Se evaluó `conv.cc` en `-O3` manteniendo `C++ = -O2` global.
 
-La sesión 1090 mostró que el tiempo TFLite permaneció aproximadamente en:
+No produjo una mejora medible y fue descartado.
 
-```text
-~122.8 ms
-```
+### P4-D - Perfilado interno por nodo
 
-Por lo tanto, P4-C fue descartado como optimización de rendimiento. El cambio de nivel de optimización del translation unit por sí solo no produjo una mejora medible.
+P4-D añadió temporalmente el observer de TFLite Micro para acumular tiempos por nodo en RAM y emitirlos sólo al final de la captura.
 
-### P4-D - Perfilado interno por nodo TFLite
-
-Se activó temporalmente el observer/profiler interno de TFLite Micro para medir cada nodo sin imprimir por UART durante la inferencia. Las métricas se acumularon en RAM y se emitieron únicamente al terminar la captura.
-
-La sesión 1091 midió 64 inferencias y 11 nodos:
+La sesión 1091 mostró que los dos `Conv2D` representaban aproximadamente el 94.5 % del tiempo TFLite:
 
 ```text
-Nodo 0  CONV_2D          avg ~34.045 ms
-Nodo 1  MAX_POOL_2D      avg ~ 2.756 ms
-Nodo 2  CONV_2D          avg ~81.791 ms
-Nodo 3  MAX_POOL_2D      avg ~ 0.842 ms
-Nodo 4  SHAPE            avg ~ 0.000 ms
-Nodo 5  STRIDED_SLICE    avg ~ 0.004 ms
-Nodo 6  PACK             avg ~ 0.001 ms
-Nodo 7  RESHAPE          avg ~ 0.050 ms
-Nodo 8  FULLY_CONNECTED  avg ~ 3.026 ms
-Nodo 9  FULLY_CONNECTED  avg ~ 0.003 ms
-Nodo 10 LOGISTIC         avg ~ 0.001 ms
+Conv2D #0 avg : 34.045 ms
+Conv2D #2 avg : 81.791 ms
 ```
 
-Los dos `Conv2D` consumían juntos aproximadamente:
+Esto justificó concentrar P4-E en el kernel float de convolución.
+
+P4-D se mantiene como herramienta de desarrollo y se elimina en producción.
+
+---
+
+## 22. P4-E1 - Punteros y strides directos
+
+P4-E1 sustituyó indexación multidimensional repetitiva por aritmética directa de punteros y strides, manteniendo el orden de cálculo.
+
+Sesión 1092:
 
 ```text
-115.836 ms
+Conv2D #0 : 34.045 ms -> 23.033 ms
+Conv2D #2 : 81.791 ms -> 37.702 ms
 ```
 
-sobre unos:
-
-```text
-122.5 ms
-```
-
-medidos dentro de TFLite, es decir, aproximadamente el 94.5 % del tiempo total de inferencia.
-
-Este resultado confirmó que la siguiente optimización debía centrarse directamente en la implementación float de `Conv2D`.
-
-### P4-E1 - Optimización del `reference_ops::Conv()` float
-
-El camino `float32` utilizado por el modelo ejecuta la convolución de referencia de TensorFlow Lite Micro. La implementación original recalculaba offsets multidimensionales para cada multiplicación dentro del bucle más interno.
-
-P4-E1 mantuvo sin cambios:
-
-```text
-modelo
-pesos
-orden de acumulación
-stride
-padding
-dilation
-activación
-MFCC
-gate
-thresholds
-```
-
-El cambio consistió únicamente en sustituir la indexación repetitiva mediante `Offset()` por aritmética directa de punteros y strides precalculados, manteniendo el mismo orden de cálculo:
-
-```text
-filter_y
-  -> filter_x
-     -> in_channel
-```
-
-La sesión 1092 validó una mejora importante:
-
-```text
-Conv2D #0 promedio : 34.045 ms -> 23.033 ms
-Conv2D #2 promedio : 81.791 ms -> 37.702 ms
-```
-
-Resultado conjunto de ambos Conv2D:
+Tiempo combinado:
 
 ```text
 115.836 ms -> 60.735 ms
 ```
 
-lo que representa aproximadamente una reducción del 47.6 % en el tiempo combinado de convolución.
+P4-E1 fue aceptado.
 
-El tiempo máximo de TFLite por canal pasó aproximadamente de:
+---
+
+## 23. P4-E2 y P4-E3 - Especialización geométrica
+
+Se midió la geometría exacta de los dos `Conv2D`.
+
+Conv0:
 
 ```text
-122.8 ms -> 67.6 ms
+input  = [1,100,20,1]
+filter = [16,3,3,1]
+output = [1,98,18,16]
+stride = 1
+padding = VALID
+dilation = 1
+groups = 1
 ```
 
-El tiempo máximo de detección de una ventana completa de 4 canales pasó de:
+Conv2:
 
 ```text
-767.7 ms -> 546.6 ms
+input  = [1,49,9,16]
+filter = [32,3,3,16]
+output = [1,47,7,32]
+stride = 1
+padding = VALID
+dilation = 1
+groups = 1
 ```
 
-manteniendo:
+### P4-E2
+
+Se añadió un fast-path para convolución `3x3`, `stride=1`, `VALID`, `dilation=1`, `groups=1`.
+
+Sesión 1095:
 
 ```text
-queue_high = 1
-errors     = 0
-pair_skew  = 1
-64 JSON de audio
-16 órdenes completas
-4 canales activos
+Conv0 avg = 13.225 ms
+Conv2 avg = 33.936 ms
+TFLite max ~53.978 ms
+detect_us_max ~492.656 ms
 ```
 
-Comparado con la referencia anterior a estas optimizaciones:
+P4-E2 fue aceptado.
+
+### P4-E3
+
+Para `filter_input_depth == 16`, se sustituyó el loop interior por 16 MAC explícitos manteniendo el mismo orden de acumulación.
+
+Sesión 1096:
 
 ```text
-sesión 1081 : detect_us_max ~2.227 s
-sesión 1092 : detect_us_max ~0.547 s
+Conv0 avg       = 13.561 ms
+Conv2 avg       = 21.698 ms
+TFLite max      ~42.089 ms
+detect_us_max   = 444.192 ms
+P1_WINDOW max   = 444.191 ms
+queue_high      = 1
+errors          = 0
 ```
 
-La reducción acumulada de latencia máxima es aproximadamente del 75.5 %, equivalente a unas 4.1 veces más velocidad que la referencia inicial.
-
-P4-E1 queda validado como parte de la nueva base del proyecto.
-
-### Base validada actual
+Respecto a la sesión 1081:
 
 ```text
-C                  = -O3
-C++                = -O2
-FFT temporal       = DTCM
-TFLM resolver      = MicroMutableOpResolver<8>
-Conv2D float       = reference_ops::Conv() optimizado con punteros/strides
-queue_high         = 1
-errors             = 0
-caches             = sin cambios / no habilitadas
+2,227,136 us -> 444,192 us
+```
+
+P4-E3 fue aceptado y pasó a ser la nueva base.
+
+---
+
+## 24. CACHE-0, I-Cache y D-Cache
+
+Durante la revisión de memoria se detectó que la región MPU de FLASH no debía mantenerse como una región de 1 MiB con base `0x08040000`.
+
+La configuración validada CACHE-0 utiliza:
+
+```text
+FLASH MPU base = 0x08000000
+FLASH MPU size = 2 MiB
+I-Cache        = OFF
+D-Cache        = OFF
+```
+
+### CACHE-0
+
+Sesión 1099:
+
+```text
+Conv0 avg      = 13.541 ms
+Conv2 avg      = 20.653 ms
+detect_us_max  = 439.528 ms
+queue_high     = 1
+errors         = 0
+```
+
+CACHE-0 fue aceptado.
+
+### I-Cache
+
+La sesión 1100 mostró diferencias dentro del ruido experimental.
+
+Conclusión:
+
+```text
+I-Cache funcional
+beneficio medible: no
+```
+
+### D-Cache
+
+La sesión 1102 mostró una regresión reproducible, especialmente en Conv2:
+
+```text
+Conv2 avg:
+20.791 ms -> 21.709 ms
+```
+
+aproximadamente:
+
+```text
++4.42 %
+```
+
+Por ello la configuración de producción mantiene:
+
+```text
+I-Cache = OFF
+D-Cache = OFF
 ```
 
 ---
 
-## 22. Próximo paso: geometría de los dos Conv2D
+## 25. P4-E4 - Prueba descartada
 
-Antes de especializar más la implementación de convolución en P4-E2, se medirá y documentará la geometría exacta de ambos nodos `Conv2D`:
+P4-E4 desenrolló más agresivamente la estructura `3x3`.
 
-```text
-input H x W x C
-filter H x W x C
-output H x W x C
-stride
-padding
-dilation
-groups
-```
-
-El objetivo es determinar si ambos nodos pueden beneficiarse de una ruta especializada sin cambiar la matemática del modelo.
-
-La metodología se mantiene:
+Sesión 1098:
 
 ```text
-una sola variable por prueba
-medición antes de optimizar
-sin cambios en modelo ni lógica de detección
-sin UART durante la fase crítica de captura
+Conv0 avg = 15.289 ms
+Conv2 avg = 19.109 ms
 ```
+
+Aunque Conv2 mejoró, Conv0 sufrió una regresión importante y aumentó el tamaño de código.
+
+P4-E4 fue descartado.
+
+La base regresó a P4-E3 antes de continuar.
+
+---
+
+## 26. P4-E5 - Especialización exclusiva de Conv2
+
+P4-E5 mantiene P4-E3 intacto como fallback y añade una ruta especializada sólo para:
+
+```text
+input  = [1,49,9,16]
+filter = [32,3,3,16]
+output = [1,47,7,32]
+```
+
+Objetivo:
+
+```text
+calcular una sola vez los 9 punteros del patch 3x3 por output pixel
+reutilizarlos para los 32 canales de salida
+mantener exactamente el orden de acumulación
+no usar fast-math
+no usar acumuladores paralelos
+no cambiar precisión
+```
+
+La ruta especializada se mantuvo aislada para no penalizar Conv0.
+
+### Validación con P4-D ON
+
+Sesión 1109, con los cuatro canales activos y 64 inferencias:
+
+```text
+Conv0 avg = 13.202 ms
+Conv2 avg = 19.028 ms
+invokes   = 64
+```
+
+Comparación contra P4-E3 / sesión 1099:
+
+```text
+Conv0 : 13.541 ms -> 13.202 ms   (-2.50 %)
+Conv2 : 20.653 ms -> 19.028 ms   (-7.87 %)
+```
+
+El tiempo combinado de ambos Conv2D pasó de:
+
+```text
+34.194 ms -> 32.230 ms
+```
+
+P4-E5 fue aceptado.
+
+### Footprint con P4-D
+
+```text
+P4-E3 + P4-D:
+text = 898472
+data = 528
+bss  = 444080
+
+P4-E5 + P4-D:
+text = 900400
+data = 528
+bss  = 444080
+```
+
+Coste de P4-E5:
+
+```text
++1928 bytes de text
+data sin cambio
+bss sin cambio
+```
+
+---
+
+## 27. Producción limpia P4-E5
+
+Después de validar P4-E5 se retiró únicamente P4-D.
+
+P1 permanece activo para poder medir:
+
+```text
+preprocess
+MFCC
+TFLite total
+ventana completa
+gate/calibración
+```
+
+La sesión 1110 validó la versión de producción:
+
+```text
+active              = 0x0F
+active_count        = 16 en CH0..CH3
+completed           = 19
+detected            = 19
+record_chunks       = 16
+queue_high          = 1
+copy_us_max         = 172 us
+pairs               = 1638
+pair_skew           = 1
+errors              = 0
+JSON de audio       = 64
+estado              = OK
+```
+
+Build de producción:
+
+```text
+text = 899464
+data = 512
+bss  = 443656
+```
+
+Comparación limpia:
+
+```text
+sesión 1103 = P4-E3 + CACHE-0 + P4-D OFF
+sesión 1110 = P4-E5 + CACHE-0 + P4-D OFF
+```
+
+TFLite máximo por canal:
+
+```text
+             P4-E3       P4-E5
+CH0          40.659 ms    38.922 ms
+CH1          40.481 ms    38.737 ms
+CH2          40.685 ms    38.732 ms
+CH3          40.479 ms    38.919 ms
+```
+
+Promedio de máximos:
+
+```text
+40.576 ms -> 38.828 ms
+mejora = 4.31 %
+```
+
+Ventana completa:
+
+```text
+detect_us_max:
+439.372 ms -> 431.347 ms
+
+P1_WINDOW max:
+439.371 ms -> 431.346 ms
+```
+
+Mejora de la ventana completa:
+
+```text
+~1.83 %
+```
+
+Respecto a la referencia original de la sesión 1081:
+
+```text
+2,227,136 us -> 431,347 us
+reducción    = 80.63 %
+speedup      = 5.16x
+```
+
+---
+
+## 28. Base de producción actual
+
+La base estable después de P4 queda definida como:
+
+```text
+Firmware             = v2.1.7 estable
+MCU                  = STM32H747XI / Cortex-M7
+Sample rate          = 44.1 kHz
+Canales              = 4
+Captura              = SAI2 + DMA + SDRAM
+C                    = -O3
+C++                  = -O2
+FFT temporal         = DTCM
+TFLM resolver        = MicroMutableOpResolver<8>
+Conv2D               = P4-E5
+MPU FLASH            = 0x08000000 / 2 MiB
+I-Cache              = OFF
+D-Cache              = OFF
+P4-D                 = OFF en producción
+P1                   = ON
+queue_high           = 1
+errors               = 0
+```
+
+Build de referencia:
+
+```text
+text = 899464
+data = 512
+bss  = 443656
+```
+
+Benchmark de referencia:
+
+```text
+sesión              = 1110
+detect_us_max       = 431347 us
+P1_WINDOW max       = 431346 us
+TFLite max promedio = 38.828 ms
+```
+
+Esta versión debe conservarse como checkpoint antes de comenzar P5.
+
+---
+
+## 29. Próxima campaña: P5 - MFCC
+
+Después de P4-E5, TFLite dejó de ser el mayor bloque individual del pipeline.
+
+En la sesión 1110:
+
+```text
+Preprocess max ~26-27 ms
+MFCC max       ~42.5 ms
+TFLite max     ~38.9 ms
+```
+
+El nuevo objetivo de P5 será reducir el coste de MFCC sin alterar su salida matemática.
+
+Reglas para P5:
+
+```text
+una variable por experimento
+P4-E5 permanece congelado
+CACHE-0 permanece congelado
+I-Cache y D-Cache permanecen OFF
+C = -O3
+C++ = -O2
+sin cambios de modelo
+sin cambios de gate/thresholds
+sin UART durante la fase crítica
+comparar siempre contra la sesión 1110
+```
+
+Primer objetivo de P5:
+
+```text
+descomponer MFCC internamente
+identificar qué etapa domina los ~42 ms
+optimizar únicamente la etapa medida como cuello de botella
+```
+
+La versión de producción P4-E5 queda como punto de retorno seguro durante toda la campaña P5.

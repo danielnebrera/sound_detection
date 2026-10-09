@@ -651,63 +651,6 @@ static void emit_detection_profile(void)
 }
 
 
-static void emit_tflm_profile(void)
-{
-    ModelRunnerTflmProfile profile = {0};
-
-    if (!model_runner_tflm_profile_get(&profile))
-    {
-        uart_send("[TFLM_PROFILE_FAIL]\r\n");
-        return;
-    }
-
-    for (uint32_t idx = 0U;
-         (idx < profile.node_count) &&
-         (idx < MODEL_RUNNER_TFLM_MAX_NODES);
-         idx++)
-    {
-        const ModelRunnerTflmNodeProfile *node = &profile.nodes[idx];
-
-        if (node->runs == 0U)
-        {
-            continue;
-        }
-
-        const uint32_t avg_cycles =
-            (uint32_t)(node->total_cycles / (uint64_t)node->runs);
-
-        char message[224];
-
-        snprintf(
-            message,
-            sizeof(message),
-            "[TFLM_NODE] idx=%lu name=%s runs=%lu avg_us=%lu max_us=%lu last_us=%lu\r\n",
-            (unsigned long)idx,
-            (node->name != NULL) ? node->name : "?",
-            (unsigned long)node->runs,
-            (unsigned long)cycles_to_microseconds(avg_cycles),
-            (unsigned long)cycles_to_microseconds(node->max_cycles),
-            (unsigned long)cycles_to_microseconds(node->last_cycles)
-        );
-
-        uart_send(message);
-    }
-
-    {
-        char message[96];
-
-        snprintf(
-            message,
-            sizeof(message),
-            "[TFLM_PROFILE] invokes=%lu nodes=%lu\r\n",
-            (unsigned long)profile.invokes,
-            (unsigned long)profile.node_count
-        );
-
-        uart_send(message);
-    }
-}
-
 static void stop_with_error(const char *message)
 {
     audio_recorder_disarm_stop_receiver();
@@ -782,7 +725,6 @@ int main(void)
 #endif
 
     MPU_Config();
-    SCB_EnableICache();
 
 #if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
     timeout = 0xFFFF;
@@ -865,7 +807,6 @@ int main(void)
         stop_with_error("[DETECTION_INIT_FAIL]\r\n");
     }
 
-    model_runner_tflm_profile_reset();
 
     memset(s_record_results, 0, sizeof(s_record_results));
     memset(s_record_result_valid, 0, sizeof(s_record_result_valid));
@@ -981,7 +922,6 @@ int main(void)
     }
 
     emit_detection_profile();
-    emit_tflm_profile();
 
     if (recorded_chunks == 0U)
     {
