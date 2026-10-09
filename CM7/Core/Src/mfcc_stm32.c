@@ -29,6 +29,12 @@ static float s_fft_in[N_FFT];
 __attribute__((section(".DTCM_dsp"), aligned(32)))
 static float s_fft_out[2 * N_FFT];
 
+__attribute__((section(".DTCM_dsp"), aligned(32)))
+static float s_cfft_twiddle[N_FFT];
+
+__attribute__((section(".DTCM_dsp"), aligned(32)))
+static float s_rfft_twiddle[N_FFT];
+
 /* DSP scratch in DTCM keeps large temporary arrays off the stack. */
 __attribute__((section(".DTCM_dsp"), aligned(32)))
 static float s_hann[N_FFT];
@@ -47,6 +53,40 @@ static float s_mfcc_frame[N_MFCC];
 
 static arm_rfft_fast_instance_f32 s_rfft;
 static bool s_inited = false;
+
+
+static MfccStm32Profile s_profile = {0};
+
+static inline uint32_t mfcc_profile_now(void)
+{
+    return DWT->CYCCNT;
+}
+
+static inline void mfcc_profile_add_stage(
+    MfccProfileStage stage,
+    uint32_t cycles)
+{
+    MfccProfileStageStats *stats = &s_profile.stage[stage];
+
+    stats->total_cycles += (uint64_t)cycles;
+    stats->last_cycles = cycles;
+    stats->runs++;
+
+    if (cycles > stats->max_cycles) {
+        stats->max_cycles = cycles;
+    }
+}
+
+static inline void mfcc_profile_add_compute(uint32_t cycles)
+{
+    s_profile.compute_total_cycles += (uint64_t)cycles;
+    s_profile.compute_last_cycles = cycles;
+    s_profile.compute_runs++;
+
+    if (cycles > s_profile.compute_max_cycles) {
+        s_profile.compute_max_cycles = cycles;
+    }
+}
 
 static inline float reflect_at(const float *x, int n, int idx)
 {
@@ -77,6 +117,20 @@ bool mfcc_stm32_init(void)
         return false;
     }
 
+    memcpy(
+        s_cfft_twiddle,
+        s_rfft.Sint.pTwiddle,
+        sizeof(s_cfft_twiddle)
+    );
+    s_rfft.Sint.pTwiddle = s_cfft_twiddle;
+
+    memcpy(
+        s_rfft_twiddle,
+        s_rfft.pTwiddleRFFT,
+        sizeof(s_rfft_twiddle)
+    );
+    s_rfft.pTwiddleRFFT = s_rfft_twiddle;
+
     s_inited = true;
     printf("[MFCC] Init OK (N_FFT=%d, N_MELS=%d, N_MFCC=%d)\r\n", N_FFT, N_MELS, N_MFCC);
     return true;
@@ -97,6 +151,7 @@ void mfcc_stm32_apply_dsp(float *samples, int n)
 
 static bool mfcc_compute_internal(const float *pcm, int n_in, mfcc_100x20_t *out)
 {
+    const uint32_t compute_start_cycles = mfcc_profile_now();
     const int pad = N_FFT / 2;
 
     int n_frames = 1 + (n_in + 2 * pad - N_FFT) / HOP;
@@ -107,14 +162,24 @@ static bool mfcc_compute_internal(const float *pcm, int n_in, mfcc_100x20_t *out
     for (int f = 0; f < n_frames; f++)
     {
         const int start = f * HOP - pad;
+        uint32_t stage_start_cycles;
 
-        /* Ventana → buffer de entrada separado */
+        stage_start_cycles = mfcc_profile_now();
         for (int i = 0; i < N_FFT; i++)
             s_fft_in[i] = reflect_at(pcm, n_in, start + i) * s_hann[i];
+        mfcc_profile_add_stage(
+            MFCC_PROFILE_STAGE_WINDOW,
+            mfcc_profile_now() - stage_start_cycles
+        );
 
-        /* FFT con buffers separados */
+        stage_start_cycles = mfcc_profile_now();
         arm_rfft_fast_f32(&s_rfft, s_fft_in, s_fft_out, 0);
+        mfcc_profile_add_stage(
+            MFCC_PROFILE_STAGE_FFT,
+            mfcc_profile_now() - stage_start_cycles
+        );
 
+        stage_start_cycles = mfcc_profile_now();
         s_power[0] = s_fft_out[0] * s_fft_out[0];
         for (int k = 1; k < N_FFT / 2; k++) {
             float re = s_fft_out[2 * k];
@@ -122,7 +187,12 @@ static bool mfcc_compute_internal(const float *pcm, int n_in, mfcc_100x20_t *out
             s_power[k] = re * re + im * im;
         }
         s_power[N_FFT / 2] = s_fft_out[1] * s_fft_out[1];
+        mfcc_profile_add_stage(
+            MFCC_PROFILE_STAGE_POWER,
+            mfcc_profile_now() - stage_start_cycles
+        );
 
+        stage_start_cycles = mfcc_profile_now();
         for (int m = 0; m < N_MELS; m++) {
             uint32_t bin_start = k_mel_start[m];
             uint32_t length    = k_mel_length[m];
@@ -132,13 +202,23 @@ static bool mfcc_compute_internal(const float *pcm, int n_in, mfcc_100x20_t *out
                 acc += s_power[bin_start + j] * k_mel_values[offset + j];
             s_mel_a[m] = acc;
         }
+        mfcc_profile_add_stage(
+            MFCC_PROFILE_STAGE_MEL,
+            mfcc_profile_now() - stage_start_cycles
+        );
 
+        stage_start_cycles = mfcc_profile_now();
         for (int m = 0; m < N_MELS; m++) {
             float val = s_mel_a[m] < 1e-10f ? 1e-10f : s_mel_a[m];
             float db  = 10.0f * log10f(val);
             s_mel_a[m] = db < -80.0f ? -80.0f : db;
         }
+        mfcc_profile_add_stage(
+            MFCC_PROFILE_STAGE_LOG,
+            mfcc_profile_now() - stage_start_cycles
+        );
 
+        stage_start_cycles = mfcc_profile_now();
         float *dst = &out->data[f * N_MFCC];
         for (int c = 0; c < N_MFCC; c++) {
             const float *dct_row = &k_dct_matrix[c * N_MELS];
@@ -147,8 +227,33 @@ static bool mfcc_compute_internal(const float *pcm, int n_in, mfcc_100x20_t *out
                 acc += dct_row[m] * s_mel_a[m];
             dst[c] = acc;
         }
+        mfcc_profile_add_stage(
+            MFCC_PROFILE_STAGE_DCT,
+            mfcc_profile_now() - stage_start_cycles
+        );
+
+        s_profile.frames_profiled++;
     }
 
+    mfcc_profile_add_compute(
+        mfcc_profile_now() - compute_start_cycles
+    );
+
+    return true;
+}
+
+void mfcc_stm32_profile_reset(void)
+{
+    memset(&s_profile, 0, sizeof(s_profile));
+}
+
+bool mfcc_stm32_profile_get(MfccStm32Profile *out)
+{
+    if (out == NULL) {
+        return false;
+    }
+
+    *out = s_profile;
     return true;
 }
 

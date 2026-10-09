@@ -20,6 +20,8 @@
 #include "audio_capture.h"
 #include "audio_recorder.h"
 #include "drone_detection.h"
+#include "mfcc_stm32.h"
+#include "p5_fft_profile.h"
 #include "model_runner_stm32.h"
 #include "portenta_sdram.h"
 #include "stm32h7xx.h"
@@ -651,6 +653,152 @@ static void emit_detection_profile(void)
 }
 
 
+
+static void emit_mfcc_profile(void)
+{
+    static const char *stage_names[MFCC_PROFILE_STAGE_COUNT] =
+    {
+        "WINDOW",
+        "FFT",
+        "POWER",
+        "MEL",
+        "LOG",
+        "DCT"
+    };
+
+    MfccStm32Profile profile = {0};
+
+    if (!mfcc_stm32_profile_get(&profile))
+    {
+        uart_send("[P5_MFCC_PROFILE_FAIL]\r\n");
+        return;
+    }
+
+    for (uint32_t stage = 0U;
+         stage < (uint32_t)MFCC_PROFILE_STAGE_COUNT;
+         stage++)
+    {
+        const MfccProfileStageStats *stats = &profile.stage[stage];
+        const uint32_t average_cycles =
+            (stats->runs == 0U)
+                ? 0U
+                : (uint32_t)(stats->total_cycles / stats->runs);
+
+        char message[192];
+
+        snprintf(
+            message,
+            sizeof(message),
+            "[P5_MFCC_STAGE] name=%s runs=%lu avg_us=%lu max_us=%lu last_us=%lu\r\n",
+            stage_names[stage],
+            (unsigned long)stats->runs,
+            (unsigned long)cycles_to_microseconds(average_cycles),
+            (unsigned long)cycles_to_microseconds(stats->max_cycles),
+            (unsigned long)cycles_to_microseconds(stats->last_cycles)
+        );
+
+        uart_send(message);
+    }
+
+    {
+        const uint32_t average_compute_cycles =
+            (profile.compute_runs == 0U)
+                ? 0U
+                : (uint32_t)(
+                    profile.compute_total_cycles /
+                    profile.compute_runs
+                );
+
+        char message[192];
+
+        snprintf(
+            message,
+            sizeof(message),
+            "[P5_MFCC_PROFILE] computes=%lu frames=%lu avg_us=%lu max_us=%lu last_us=%lu stages=%u\r\n",
+            (unsigned long)profile.compute_runs,
+            (unsigned long)profile.frames_profiled,
+            (unsigned long)cycles_to_microseconds(
+                average_compute_cycles
+            ),
+            (unsigned long)cycles_to_microseconds(
+                profile.compute_max_cycles
+            ),
+            (unsigned long)cycles_to_microseconds(
+                profile.compute_last_cycles
+            ),
+            (unsigned)MFCC_PROFILE_STAGE_COUNT
+        );
+
+        uart_send(message);
+    }
+}
+
+
+
+static void emit_fft_profile(void)
+{
+    static const char *stage_names[P5_FFT_STAGE_COUNT] =
+    {
+        "RFFT_TOTAL",
+        "CFFT_TOTAL",
+        "RFFT_STAGE",
+        "CFFT_KERNEL",
+        "BITREV",
+        "RADIX2_PREP",
+        "RADIX8_COL1",
+        "RADIX8_COL2"
+    };
+
+    P5FftProfile profile = {0};
+
+    if (!p5_fft_profile_get(&profile))
+    {
+        uart_send("[P5_FFT_PROFILE_FAIL]\r\n");
+        return;
+    }
+
+    for (uint32_t stage = 0U;
+         stage < (uint32_t)P5_FFT_STAGE_COUNT;
+         stage++)
+    {
+        const P5FftProfileStageStats *stats = &profile.stage[stage];
+        const uint32_t average_cycles =
+            (stats->runs == 0U)
+                ? 0U
+                : (uint32_t)(stats->total_cycles / stats->runs);
+
+        char message[192];
+
+        snprintf(
+            message,
+            sizeof(message),
+            "[P5_FFT_STAGE] name=%s runs=%lu avg_us=%lu max_us=%lu last_us=%lu\r\n",
+            stage_names[stage],
+            (unsigned long)stats->runs,
+            (unsigned long)cycles_to_microseconds(average_cycles),
+            (unsigned long)cycles_to_microseconds(stats->max_cycles),
+            (unsigned long)cycles_to_microseconds(stats->last_cycles)
+        );
+
+        uart_send(message);
+    }
+
+    {
+        char message[128];
+
+        snprintf(
+            message,
+            sizeof(message),
+            "[P5_FFT_PROFILE] rfft_runs=%lu stages=%u\r\n",
+            (unsigned long)profile.stage[P5_FFT_STAGE_RFFT_TOTAL].runs,
+            (unsigned)P5_FFT_STAGE_COUNT
+        );
+
+        uart_send(message);
+    }
+}
+
+
 static void stop_with_error(const char *message)
 {
     audio_recorder_disarm_stop_receiver();
@@ -816,6 +964,9 @@ int main(void)
         stop_with_error("[RECORD_COMMAND_FAIL]\r\n");
     }
 
+    mfcc_stm32_profile_reset();
+    p5_fft_profile_reset();
+
     uart_send(
         "[CAPTURE_STARTED] calibration=3 max_record=16 "
         "stop_at_second_boundary=1 detection=concurrent\r\n"
@@ -922,6 +1073,8 @@ int main(void)
     }
 
     emit_detection_profile();
+    emit_mfcc_profile();
+    emit_fft_profile();
 
     if (recorded_chunks == 0U)
     {

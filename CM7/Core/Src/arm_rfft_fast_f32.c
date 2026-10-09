@@ -27,6 +27,42 @@
  */
 
 #include "dsp/transform_functions.h"
+#include "p5_fft_profile.h"
+
+
+static P5FftProfile s_p5_fft_profile = {0};
+
+void p5_fft_profile_reset(void)
+{
+    s_p5_fft_profile = (P5FftProfile){0};
+}
+
+bool p5_fft_profile_get(P5FftProfile *out)
+{
+    if (out == NULL) {
+        return false;
+    }
+
+    *out = s_p5_fft_profile;
+    return true;
+}
+
+void p5_fft_profile_add(P5FftProfileStage stage, uint32_t cycles)
+{
+    if ((uint32_t)stage >= (uint32_t)P5_FFT_STAGE_COUNT) {
+        return;
+    }
+
+    P5FftProfileStageStats *stats = &s_p5_fft_profile.stage[stage];
+
+    stats->total_cycles += (uint64_t)cycles;
+    stats->last_cycles = cycles;
+    stats->runs++;
+
+    if (cycles > stats->max_cycles) {
+        stats->max_cycles = cycles;
+    }
+}
 
 #if defined(ARM_MATH_MVEF) && !defined(ARM_MATH_AUTOVECTORIZE)
 void stage_rfft_f32(
@@ -590,11 +626,32 @@ void arm_rfft_fast_f32(
    }
    else
    {
+      const uint32_t rfft_start_cycles = p5_fft_profile_now();
+
+      uint32_t stage_start_cycles = p5_fft_profile_now();
+
       /* Calculation of RFFT of input */
       arm_cfft_f32( Sint, p, ifftFlag, 1);
 
+      p5_fft_profile_add(
+          P5_FFT_STAGE_CFFT_TOTAL,
+          p5_fft_profile_now() - stage_start_cycles
+      );
+
+      stage_start_cycles = p5_fft_profile_now();
+
       /*  Real FFT extraction */
       stage_rfft_f32(S, p, pOut);
+
+      p5_fft_profile_add(
+          P5_FFT_STAGE_RFFT_STAGE,
+          p5_fft_profile_now() - stage_start_cycles
+      );
+
+      p5_fft_profile_add(
+          P5_FFT_STAGE_RFFT_TOTAL,
+          p5_fft_profile_now() - rfft_start_cycles
+      );
    }
 }
 

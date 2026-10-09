@@ -28,6 +28,7 @@
 
 #include "dsp/transform_functions.h"
 #include "arm_common_tables.h"
+#include "p5_fft_profile.h"
 
 #if defined(ARM_MATH_MVEF) && !defined(ARM_MATH_AUTOVECTORIZE)
 
@@ -590,6 +591,10 @@ extern void arm_radix8_butterfly_f32(
   const float32_t * pCoef,
         uint16_t twidCoefModifier);
 
+extern void arm_radix8_butterfly_512_mod2_p5g_f32(
+        float32_t * pSrc,
+  const float32_t * pCoef);
+
 extern void arm_bitreversal_32(
         uint32_t * pSrc,
   const uint16_t bitRevLen,
@@ -764,6 +769,8 @@ void arm_cfft_radix8by2_f32 (arm_cfft_instance_f32 * S, float32_t * p1)
   float32_t m0, m1, m2, m3;
   uint32_t l;
 
+  uint32_t stage_start_cycles = p5_fft_profile_now();
+
   pCol1 = p1;
   pCol2 = p2;
 
@@ -861,11 +868,60 @@ void arm_cfft_radix8by2_f32 (arm_cfft_instance_f32 * S, float32_t * p1)
     *pMid2++ = m2 + m3;
   }
 
+  p5_fft_profile_add(
+      P5_FFT_STAGE_RADIX2_PREP,
+      p5_fft_profile_now() - stage_start_cycles
+  );
+
+  stage_start_cycles = p5_fft_profile_now();
+
   /* first col */
-  arm_radix8_butterfly_f32 (pCol1, L, (float32_t *) S->pTwiddle, 2U);
+  if ((S->fftLen == 1024U) && (L == 512U))
+  {
+    arm_radix8_butterfly_512_mod2_p5g_f32(
+        pCol1,
+        (float32_t *) S->pTwiddle
+    );
+  }
+  else
+  {
+    arm_radix8_butterfly_f32(
+        pCol1,
+        L,
+        (float32_t *) S->pTwiddle,
+        2U
+    );
+  }
+
+  p5_fft_profile_add(
+      P5_FFT_STAGE_RADIX8_COL1,
+      p5_fft_profile_now() - stage_start_cycles
+  );
+
+  stage_start_cycles = p5_fft_profile_now();
 
   /* second col */
-  arm_radix8_butterfly_f32 (pCol2, L, (float32_t *) S->pTwiddle, 2U);
+  if ((S->fftLen == 1024U) && (L == 512U))
+  {
+    arm_radix8_butterfly_512_mod2_p5g_f32(
+        pCol2,
+        (float32_t *) S->pTwiddle
+    );
+  }
+  else
+  {
+    arm_radix8_butterfly_f32(
+        pCol2,
+        L,
+        (float32_t *) S->pTwiddle,
+        2U
+    );
+  }
+
+  p5_fft_profile_add(
+      P5_FFT_STAGE_RADIX8_COL2,
+      p5_fft_profile_now() - stage_start_cycles
+  );
 }
 
 void arm_cfft_radix8by4_f32 (arm_cfft_instance_f32 * S, float32_t * p1)
@@ -1149,6 +1205,8 @@ void arm_cfft_f32(
     }
   }
 
+  uint32_t stage_start_cycles = p5_fft_profile_now();
+
   switch (L)
   {
   case 16:
@@ -1168,8 +1226,22 @@ void arm_cfft_f32(
     break;
   }
 
+  p5_fft_profile_add(
+      P5_FFT_STAGE_CFFT_KERNEL,
+      p5_fft_profile_now() - stage_start_cycles
+  );
+
   if ( bitReverseFlag )
+  {
+    stage_start_cycles = p5_fft_profile_now();
+
     arm_bitreversal_32 ((uint32_t*) p1, S->bitRevLength, S->pBitRevTable);
+
+    p5_fft_profile_add(
+        P5_FFT_STAGE_BITREV,
+        p5_fft_profile_now() - stage_start_cycles
+    );
+  }
 
   if (ifftFlag == 1U)
   {

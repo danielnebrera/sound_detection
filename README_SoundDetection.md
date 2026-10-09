@@ -970,7 +970,42 @@ speedup      = 5.16x
 
 ---
 
-## 28. Base de producción actual
+## 28. Incidente físico SEL durante la validación
+
+Durante las sesiones 1104-1108 aparecieron temporalmente sólo dos canales activos:
+
+```text
+active = 0x06
+```
+
+CH0 y CH3 mostraban niveles post-DSP cercanos a `0 dBFS`, mientras CH1 y CH2 permanecían alrededor de `-40 dBFS`.
+
+Se comprobó que no era una regresión de:
+
+```text
+P4-E5
+P4-D
+CACHE-0
+MFCC
+TFLite
+```
+
+La causa fue física: los pines `SEL` no estaban haciendo buen contacto con el adaptador de voltaje.
+
+Los `SEL` se mantienen sin soldar de forma deliberada para facilitar pruebas de intercambio entre `GND` y `VCC`.
+
+Después de corregir el contacto, la captura regresó inmediatamente a:
+
+```text
+active = 0x0F
+active_count = 16 en los cuatro canales
+```
+
+Este incidente no se utiliza como benchmark de rendimiento.
+
+---
+
+## 29. Base de producción actual
 
 La base estable después de P4 queda definida como:
 
@@ -1015,7 +1050,7 @@ Esta versión debe conservarse como checkpoint antes de comenzar P5.
 
 ---
 
-## 29. Próxima campaña: P5 - MFCC
+## 30. Próxima campaña: P5 - MFCC
 
 Después de P4-E5, TFLite dejó de ser el mayor bloque individual del pipeline.
 
@@ -1053,3 +1088,623 @@ optimizar únicamente la etapa medida como cuello de botella
 ```
 
 La versión de producción P4-E5 queda como punto de retorno seguro durante toda la campaña P5.
+
+---
+
+## 31. P5-A - Perfilado interno del MFCC
+
+La campaña P5 comenzó instrumentando internamente el cálculo MFCC sin alterar su matemática.
+
+Se midieron por separado las etapas:
+
+```text
+WINDOW
+FFT
+POWER
+MEL
+LOG
+DCT
+```
+
+Las métricas se acumulan durante la captura y se emiten únicamente al finalizar, evitando UART dentro de la fase crítica.
+
+La sesión 1111 mostró:
+
+```text
+WINDOW avg = 56 us/frame
+FFT avg    = 241 us/frame
+POWER avg  = 26 us/frame
+MEL avg    = 45 us/frame
+LOG avg    = 27 us/frame
+DCT avg    = 25 us/frame
+
+MFCC compute avg = 42.432 ms
+MFCC compute max = 42.554 ms
+```
+
+La FFT representó aproximadamente el 56.8 % del tiempo interno medido por frame y quedó identificada como el principal cuello de botella dentro del MFCC.
+
+Build P5-A:
+
+```text
+text = 900424
+data = 512
+bss  = 443832
+```
+
+P5-A se mantiene como profiler de diagnóstico durante las pruebas P5.
+
+---
+
+## 32. P5-B - Perfilado interno de RFFT/CFFT
+
+Se añadió un segundo profiler para descomponer la FFT de CMSIS-DSP sin modificar su matemática.
+
+La ruta utilizada por `N_FFT = 2048` es:
+
+```text
+RFFT 2048
+  -> CFFT interna 1024
+  -> radix-8 + radix-2
+  -> bit reversal
+  -> etapa RFFT
+```
+
+Se midieron:
+
+```text
+RFFT_TOTAL
+CFFT_TOTAL
+RFFT_STAGE
+CFFT_KERNEL
+BITREV
+RADIX2_PREP
+RADIX8_COL1
+RADIX8_COL2
+```
+
+La sesión 1112 obtuvo:
+
+```text
+RFFT_TOTAL   = 242 us/frame
+CFFT_TOTAL   = 182 us/frame
+RFFT_STAGE   =  60 us/frame
+CFFT_KERNEL  = 156 us/frame
+BITREV       =  25 us/frame
+RADIX2_PREP  =  22 us/frame
+RADIX8_COL1  =  68 us/frame
+RADIX8_COL2  =  65 us/frame
+```
+
+Los dos bloques radix-8 consumían conjuntamente:
+
+```text
+68 + 65 = 133 us/frame
+```
+
+equivalentes aproximadamente al:
+
+```text
+85.3 % del CFFT kernel
+55.0 % del RFFT total
+```
+
+Esto identificó el radix-8 como el principal objetivo interno de la FFT.
+
+Build P5-B:
+
+```text
+text = 901208
+data = 512
+bss  = 444024
+```
+
+P5-B se mantiene activo como profiler durante las siguientes pruebas.
+
+---
+
+## 33. P5-C - Twiddle CFFT desde FLASH hacia DTCM
+
+P5-C movió únicamente la tabla de twiddles utilizada por la CFFT interna de 1024 puntos desde FLASH hacia DTCM.
+
+Se añadió:
+
+```text
+2048 float32 = 8192 bytes
+```
+
+en `.DTCM_dsp`.
+
+No se modificó:
+
+```text
+algoritmo FFT
+orden matemático
+twiddle values
+N_FFT
+MFCC
+TFLite
+gate
+caches
+compiler flags
+```
+
+Build:
+
+```text
+P5-B:
+text = 901208
+data = 512
+bss  = 444024
+
+P5-C:
+text = 901232
+data = 512
+bss  = 452216
+```
+
+El incremento de `bss` fue exactamente:
+
+```text
++8192 bytes
+```
+
+La sesión 1113 mostró:
+
+```text
+MFCC avg      42.598 ms -> 41.738 ms
+FFT avg          242 us ->    235 us
+CFFT total       182 us ->    175 us
+CFFT kernel      156 us ->    150 us
+RADIX2_PREP       22 us ->     20 us
+RADIX8_COL1       68 us ->     64 us
+RADIX8_COL2       65 us ->     64 us
+detect_us_max 434360 us -> 431771 us
+```
+
+La mejora fue coherente con una reducción del coste de acceso a los twiddles de la CFFT.
+
+Decisión:
+
+```text
+P5-C = ACEPTADO
+```
+
+---
+
+## 34. P5-D - Twiddle RFFT desde FLASH hacia DTCM
+
+P5-D mantuvo P5-C y movió además la tabla de twiddles de la etapa RFFT 2048 desde FLASH hacia DTCM.
+
+Coste adicional:
+
+```text
+2048 float32 = 8192 bytes
+```
+
+Build:
+
+```text
+P5-C:
+text = 901232
+data = 512
+bss  = 452216
+
+P5-D:
+text = 901248
+data = 512
+bss  = 460408
+```
+
+El incremento de `bss` fue nuevamente exactamente:
+
+```text
++8192 bytes
+```
+
+La sesión 1114 mostró una firma causal muy clara:
+
+```text
+                       P5-C       P5-D
+MFCC avg              41.738 ms   40.572 ms
+FFT / RFFT_TOTAL         235 us      227 us
+CFFT_TOTAL               175 us      174 us
+RFFT_STAGE                59 us       51 us
+CFFT_KERNEL              150 us      150 us
+BITREV                     24 us       24 us
+RADIX2_PREP                20 us       20 us
+RADIX8_COL1                64 us       64 us
+RADIX8_COL2                64 us       64 us
+detect_us_max          431771 us   426016 us
+```
+
+La etapa directamente afectada fue:
+
+```text
+RFFT_STAGE:
+59 us -> 51 us
+reducción ~13.6 %
+```
+
+mientras el núcleo CFFT permaneció estable.
+
+Decisión:
+
+```text
+P5-D = ACEPTADO
+```
+
+P5-D quedó como checkpoint para los experimentos posteriores del radix-8.
+
+---
+
+## 35. P5-E - Radix-8 ejecutado desde ITCM
+
+P5-E probó si el fetch de instrucciones desde FLASH era un cuello de botella para `arm_radix8_butterfly_f32()`.
+
+Únicamente esa función se colocó en ITCM.
+
+El `.map` confirmó:
+
+```text
+.ITCM_text VMA       = 0x00000000
+arm_radix8_butterfly = 0x00000000
+función size         = 0x51C = 1308 bytes
+load address FLASH   = 0x0811BBB8
+```
+
+Build:
+
+```text
+text = 901328
+data = 512
+bss  = 460408
+```
+
+La sesión 1115 mostró:
+
+```text
+                       P5-D       P5-E
+RADIX8_COL1              64 us       64 us
+RADIX8_COL2              64 us       64 us
+CFFT_KERNEL             150 us      150 us
+CFFT_TOTAL              174 us      175 us
+RFFT_TOTAL              227 us      224 us
+MFCC avg             40.572 ms   40.336 ms
+detect_us_max         426016 us   425362 us
+```
+
+Las dos etapas radix-8 no mejoraron.
+
+Por lo tanto, la pequeña variación global no se atribuye al cambio de ubicación del código.
+
+Conclusión:
+
+```text
+instruction fetch desde FLASH no es un cuello de botella significativo
+para el radix-8 en esta configuración
+```
+
+Decisión:
+
+```text
+P5-E = RECHAZADO
+```
+
+---
+
+## 36. P5-F - Fast-path 512/modifier=2 con parámetros constantes
+
+P5-F creó un fast-path específico para la geometría utilizada por la CFFT interna:
+
+```text
+fftLen            = 512
+twidCoefModifier  = 2
+```
+
+La implementación CMSIS original se mantuvo como fallback.
+
+No se modificó:
+
+```text
+orden matemático
+twiddles
+sumas/restas
+multiplicaciones
+C81
+caches
+compiler flags
+```
+
+Build:
+
+```text
+text = 902600
+data = 512
+bss  = 460408
+```
+
+La sesión 1116 obtuvo:
+
+```text
+                       P5-D       P5-F
+RADIX8_COL1              64 us       64 us
+RADIX8_COL2              64 us       64 us
+RADIX2_PREP               20 us       20 us
+CFFT_KERNEL              150 us      149 us
+CFFT_TOTAL               174 us      174 us
+RFFT_TOTAL               227 us      224 us
+MFCC avg             40.572 ms   40.294 ms
+detect_us_max         426016 us   426080 us
+```
+
+La especialización de parámetros por sí sola no produjo una reducción medible del radix-8.
+
+Decisión:
+
+```text
+P5-F = RECHAZADO
+```
+
+---
+
+## 37. P5-G - Especialización estructural del radix-8
+
+P5-G mantuvo como base P5-D y especializó estructuralmente la ruta exacta utilizada por el proyecto:
+
+```text
+RFFT 2048
+  -> CFFT 1024
+  -> radix8by2
+  -> dos columnas de 512 puntos
+  -> twidCoefModifier = 2
+```
+
+Se conserva la función CMSIS genérica como fallback.
+
+La nueva ruta elimina trabajo de control e indexado que era necesario para la implementación genérica:
+
+```text
+cálculo dinámico de n1/n2
+actualización genérica de stages
+cadena dinámica ia1..ia7
+actualización dinámica de twidCoefModifier
+parte del cálculo repetido de índices de twiddles
+loops genéricos innecesarios para la geometría fija
+```
+
+No se modificó:
+
+```text
+orden matemático
+valores de twiddle
+sumas/restas/multiplicaciones
+C81
+formato float32
+bit reversal
+RFFT stage
+MFCC
+TFLite
+gate/thresholds
+caches
+compiler flags
+```
+
+Build P5-G:
+
+```text
+text = 903720
+data = 512
+bss  = 460408
+```
+
+Comparado con P5-D:
+
+```text
+text : +2472 bytes
+data : sin cambio
+bss  : sin cambio
+```
+
+La sesión 1117 obtuvo:
+
+```text
+                       P5-D / 1114    P5-G / 1117
+RADIX8_COL1                 64 us          56 us
+RADIX8_COL2                 64 us          56 us
+RADIX2_PREP                  20 us          20 us
+BITREV                       24 us          24 us
+CFFT_KERNEL                 150 us         133 us
+CFFT_TOTAL                  174 us         158 us
+RFFT_STAGE                   51 us          51 us
+RFFT_TOTAL / FFT            227 us         210 us
+MFCC avg                  40.572 ms      38.876 ms
+detect_us_max            426016 us      419228 us
+```
+
+Mejoras:
+
+```text
+RADIX8_COL1       -12.50 %
+RADIX8_COL2       -12.50 %
+CFFT_KERNEL       -11.33 %
+CFFT_TOTAL         -9.20 %
+RFFT_TOTAL         -7.49 %
+MFCC avg           -4.18 %
+detect_us_max      -1.59 %
+```
+
+El radix-8 conjunto pasó de:
+
+```text
+128 us/frame -> 112 us/frame
+```
+
+lo que representa:
+
+```text
+16 us/frame de ahorro
+~1.6 ms por MFCC de 100 frames
+```
+
+La reducción observada en MFCC fue:
+
+```text
+40.572 ms -> 38.876 ms
+ahorro = 1.696 ms
+```
+
+La magnitud y la localización de la mejora son coherentes con el cambio realizado.
+
+La sesión 1117 ejecutó:
+
+```text
+MFCC computes = 62
+FFT frames    = 6200
+CH0 active    = 15
+CH1 active    = 15
+CH2 active    = 16
+CH3 active    = 16
+queue_high    = 1
+copy_us_max   = 172 us
+errors        = 0
+pairs         = 1638
+pair_skew     = 1
+chunks        = 16
+JSON audio    = 64
+estado        = OK
+```
+
+La diferencia en número de ventanas activas no invalida la comparación de promedios de las etapas internas, ya que se acumularon miles de ejecuciones y la reducción se produjo exactamente en los bloques modificados.
+
+Decisión:
+
+```text
+P5-G = ACEPTADO
+```
+
+---
+
+## 38. Checkpoint P5-G
+
+P5-G se establece como nuevo checkpoint de respaldo de la campaña de optimización.
+
+Base acumulada:
+
+```text
+v2.1.7 estable
+P3    - buffers FFT en DTCM
+P4-B  - resolver TFLM mínimo
+P4-E5 - Conv2D especializado
+CACHE-0 / MPU FLASH corregido
+P5-C  - twiddle CFFT en DTCM
+P5-D  - twiddle RFFT en DTCM
+P5-G  - radix-8 especializado para CFFT1024 / columnas512
+```
+
+Configuración de compilación:
+
+```text
+C       = -O3
+C++     = -O2
+I-Cache = OFF
+D-Cache = OFF
+P4-D    = OFF
+P5-A    = ON durante diagnóstico
+P5-B    = ON durante diagnóstico
+```
+
+Build del checkpoint P5-G de diagnóstico:
+
+```text
+text = 903720
+data = 512
+bss  = 460408
+```
+
+Benchmark asociado:
+
+```text
+sesión           = 1117
+RFFT_TOTAL avg   = 210 us/frame
+CFFT_KERNEL avg  = 133 us/frame
+RADIX8_COL1 avg  = 56 us/frame
+RADIX8_COL2 avg  = 56 us/frame
+MFCC avg         = 38.876 ms
+detect_us_max    = 419228 us
+queue_high       = 1
+errors           = 0
+```
+
+Experimentos descartados durante P5:
+
+```text
+P5-E = código radix-8 en ITCM -> sin mejora localizada
+P5-F = constantes 512/mod2    -> sin mejora localizada
+```
+
+La versión P5-G debe conservarse como punto de retorno seguro antes de continuar con P5-H.
+
+---
+
+## 39. Próximo experimento: P5-H
+
+Después de P5-G el principal coste interno continúa siendo el radix-8:
+
+```text
+CFFT_KERNEL  = 133 us/frame
+RADIX8_COL1  =  56 us/frame
+RADIX8_COL2  =  56 us/frame
+```
+
+Los dos radix-8 representan aproximadamente:
+
+```text
+112 / 133 = 84.2 % del CFFT kernel
+```
+
+El siguiente experimento debe estudiar el direccionamiento interno del fast-path P5-G, especialmente operaciones repetidas de la forma:
+
+```c
+pSrc[2 * i]
+pSrc[2 * i + 1]
+```
+
+Objetivo P5-H:
+
+```text
+reducir aritmética de direccionamiento y trabajo load/store
+manteniendo exactamente la misma matemática
+```
+
+Reglas:
+
+```text
+una sola variable por prueba
+P5-G permanece como checkpoint
+CMSIS genérico permanece como fallback
+sin fast-math
+sin reassociation
+sin cambios de caches
+sin cambios de compiler flags
+sin cambios de modelo, MFCC externo, gate o thresholds
+P5-A/P5-B permanecen activos para medir el A/B
+```
+
+La métrica primaria de aceptación seguirá siendo:
+
+```text
+RADIX8_COL1
+RADIX8_COL2
+```
+
+y cualquier mejora deberá propagarse de forma coherente hacia:
+
+```text
+CFFT_KERNEL
+CFFT_TOTAL
+RFFT_TOTAL
+MFCC
+detect_us_max
+```
+

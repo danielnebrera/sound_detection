@@ -283,3 +283,250 @@ void arm_radix8_butterfly_f32(
       twidCoefModifier <<= 3;
    } while (n2 > 7);
 }
+
+void arm_radix8_butterfly_512_mod2_p5g_f32(
+  float32_t * pSrc,
+  const float32_t * pCoef)
+{
+   uint32_t i1, i2, i3, i4, i5, i6, i7, i8;
+   uint32_t j;
+
+   float32_t r1, r2, r3, r4, r5, r6, r7, r8;
+   float32_t t1, t2;
+   float32_t s1, s2, s3, s4, s5, s6, s7, s8;
+   float32_t p1, p2, p3, p4;
+   float32_t co2, co3, co4, co5, co6, co7, co8;
+   float32_t si2, si3, si4, si5, si6, si7, si8;
+   const float32_t C81 = 0.70710678118f;
+
+#define P5G_BASE_BUTTERFLY(N2_) \
+   do \
+   { \
+      i2 = i1 + (N2_); \
+      i3 = i2 + (N2_); \
+      i4 = i3 + (N2_); \
+      i5 = i4 + (N2_); \
+      i6 = i5 + (N2_); \
+      i7 = i6 + (N2_); \
+      i8 = i7 + (N2_); \
+      r1 = pSrc[2 * i1] + pSrc[2 * i5]; \
+      r5 = pSrc[2 * i1] - pSrc[2 * i5]; \
+      r2 = pSrc[2 * i2] + pSrc[2 * i6]; \
+      r6 = pSrc[2 * i2] - pSrc[2 * i6]; \
+      r3 = pSrc[2 * i3] + pSrc[2 * i7]; \
+      r7 = pSrc[2 * i3] - pSrc[2 * i7]; \
+      r4 = pSrc[2 * i4] + pSrc[2 * i8]; \
+      r8 = pSrc[2 * i4] - pSrc[2 * i8]; \
+      t1 = r1 - r3; \
+      r1 = r1 + r3; \
+      r3 = r2 - r4; \
+      r2 = r2 + r4; \
+      pSrc[2 * i1] = r1 + r2; \
+      pSrc[2 * i5] = r1 - r2; \
+      r1 = pSrc[2 * i1 + 1] + pSrc[2 * i5 + 1]; \
+      s5 = pSrc[2 * i1 + 1] - pSrc[2 * i5 + 1]; \
+      r2 = pSrc[2 * i2 + 1] + pSrc[2 * i6 + 1]; \
+      s6 = pSrc[2 * i2 + 1] - pSrc[2 * i6 + 1]; \
+      s3 = pSrc[2 * i3 + 1] + pSrc[2 * i7 + 1]; \
+      s7 = pSrc[2 * i3 + 1] - pSrc[2 * i7 + 1]; \
+      r4 = pSrc[2 * i4 + 1] + pSrc[2 * i8 + 1]; \
+      s8 = pSrc[2 * i4 + 1] - pSrc[2 * i8 + 1]; \
+      t2 = r1 - s3; \
+      r1 = r1 + s3; \
+      s3 = r2 - r4; \
+      r2 = r2 + r4; \
+      pSrc[2 * i1 + 1] = r1 + r2; \
+      pSrc[2 * i5 + 1] = r1 - r2; \
+      pSrc[2 * i3]     = t1 + s3; \
+      pSrc[2 * i7]     = t1 - s3; \
+      pSrc[2 * i3 + 1] = t2 - r3; \
+      pSrc[2 * i7 + 1] = t2 + r3; \
+      r1 = (r6 - r8) * C81; \
+      r6 = (r6 + r8) * C81; \
+      r2 = (s6 - s8) * C81; \
+      s6 = (s6 + s8) * C81; \
+      t1 = r5 - r1; \
+      r5 = r5 + r1; \
+      r8 = r7 - r6; \
+      r7 = r7 + r6; \
+      t2 = s5 - r2; \
+      s5 = s5 + r2; \
+      s8 = s7 - s6; \
+      s7 = s7 + s6; \
+      pSrc[2 * i2]     = r5 + s7; \
+      pSrc[2 * i8]     = r5 - s7; \
+      pSrc[2 * i6]     = t1 + s8; \
+      pSrc[2 * i4]     = t1 - s8; \
+      pSrc[2 * i2 + 1] = s5 - r7; \
+      pSrc[2 * i8 + 1] = s5 + r7; \
+      pSrc[2 * i6 + 1] = t2 - r8; \
+      pSrc[2 * i4 + 1] = t2 + r8; \
+   } while (0)
+
+#define P5G_TWIDDLE_BUTTERFLY(N2_) \
+   do \
+   { \
+      i2 = i1 + (N2_); \
+      i3 = i2 + (N2_); \
+      i4 = i3 + (N2_); \
+      i5 = i4 + (N2_); \
+      i6 = i5 + (N2_); \
+      i7 = i6 + (N2_); \
+      i8 = i7 + (N2_); \
+      r1 = pSrc[2 * i1] + pSrc[2 * i5]; \
+      r5 = pSrc[2 * i1] - pSrc[2 * i5]; \
+      r2 = pSrc[2 * i2] + pSrc[2 * i6]; \
+      r6 = pSrc[2 * i2] - pSrc[2 * i6]; \
+      r3 = pSrc[2 * i3] + pSrc[2 * i7]; \
+      r7 = pSrc[2 * i3] - pSrc[2 * i7]; \
+      r4 = pSrc[2 * i4] + pSrc[2 * i8]; \
+      r8 = pSrc[2 * i4] - pSrc[2 * i8]; \
+      t1 = r1 - r3; \
+      r1 = r1 + r3; \
+      r3 = r2 - r4; \
+      r2 = r2 + r4; \
+      pSrc[2 * i1] = r1 + r2; \
+      r2 = r1 - r2; \
+      s1 = pSrc[2 * i1 + 1] + pSrc[2 * i5 + 1]; \
+      s5 = pSrc[2 * i1 + 1] - pSrc[2 * i5 + 1]; \
+      s2 = pSrc[2 * i2 + 1] + pSrc[2 * i6 + 1]; \
+      s6 = pSrc[2 * i2 + 1] - pSrc[2 * i6 + 1]; \
+      s3 = pSrc[2 * i3 + 1] + pSrc[2 * i7 + 1]; \
+      s7 = pSrc[2 * i3 + 1] - pSrc[2 * i7 + 1]; \
+      s4 = pSrc[2 * i4 + 1] + pSrc[2 * i8 + 1]; \
+      s8 = pSrc[2 * i4 + 1] - pSrc[2 * i8 + 1]; \
+      t2 = s1 - s3; \
+      s1 = s1 + s3; \
+      s3 = s2 - s4; \
+      s2 = s2 + s4; \
+      r1 = t1 + s3; \
+      t1 = t1 - s3; \
+      pSrc[2 * i1 + 1] = s1 + s2; \
+      s2 = s1 - s2; \
+      s1 = t2 - r3; \
+      t2 = t2 + r3; \
+      p1 = co5 * r2; \
+      p2 = si5 * s2; \
+      p3 = co5 * s2; \
+      p4 = si5 * r2; \
+      pSrc[2 * i5]     = p1 + p2; \
+      pSrc[2 * i5 + 1] = p3 - p4; \
+      p1 = co3 * r1; \
+      p2 = si3 * s1; \
+      p3 = co3 * s1; \
+      p4 = si3 * r1; \
+      pSrc[2 * i3]     = p1 + p2; \
+      pSrc[2 * i3 + 1] = p3 - p4; \
+      p1 = co7 * t1; \
+      p2 = si7 * t2; \
+      p3 = co7 * t2; \
+      p4 = si7 * t1; \
+      pSrc[2 * i7]     = p1 + p2; \
+      pSrc[2 * i7 + 1] = p3 - p4; \
+      r1 = (r6 - r8) * C81; \
+      r6 = (r6 + r8) * C81; \
+      s1 = (s6 - s8) * C81; \
+      s6 = (s6 + s8) * C81; \
+      t1 = r5 - r1; \
+      r5 = r5 + r1; \
+      r8 = r7 - r6; \
+      r7 = r7 + r6; \
+      t2 = s5 - s1; \
+      s5 = s5 + s1; \
+      s8 = s7 - s6; \
+      s7 = s7 + s6; \
+      r1 = r5 + s7; \
+      r5 = r5 - s7; \
+      r6 = t1 + s8; \
+      t1 = t1 - s8; \
+      s1 = s5 - r7; \
+      s5 = s5 + r7; \
+      s6 = t2 - r8; \
+      t2 = t2 + r8; \
+      p1 = co2 * r1; \
+      p2 = si2 * s1; \
+      p3 = co2 * s1; \
+      p4 = si2 * r1; \
+      pSrc[2 * i2]     = p1 + p2; \
+      pSrc[2 * i2 + 1] = p3 - p4; \
+      p1 = co8 * r5; \
+      p2 = si8 * s5; \
+      p3 = co8 * s5; \
+      p4 = si8 * r5; \
+      pSrc[2 * i8]     = p1 + p2; \
+      pSrc[2 * i8 + 1] = p3 - p4; \
+      p1 = co6 * r6; \
+      p2 = si6 * s6; \
+      p3 = co6 * s6; \
+      p4 = si6 * r6; \
+      pSrc[2 * i6]     = p1 + p2; \
+      pSrc[2 * i6 + 1] = p3 - p4; \
+      p1 = co4 * t1; \
+      p2 = si4 * t2; \
+      p3 = co4 * t2; \
+      p4 = si4 * t1; \
+      pSrc[2 * i4]     = p1 + p2; \
+      pSrc[2 * i4 + 1] = p3 - p4; \
+   } while (0)
+
+   i1 = 0U;
+   P5G_BASE_BUTTERFLY(64U);
+
+   for (j = 1U; j < 64U; j++)
+   {
+      co2 = pCoef[4U * j];
+      co3 = pCoef[8U * j];
+      co4 = pCoef[12U * j];
+      co5 = pCoef[16U * j];
+      co6 = pCoef[20U * j];
+      co7 = pCoef[24U * j];
+      co8 = pCoef[28U * j];
+      si2 = pCoef[4U * j + 1U];
+      si3 = pCoef[8U * j + 1U];
+      si4 = pCoef[12U * j + 1U];
+      si5 = pCoef[16U * j + 1U];
+      si6 = pCoef[20U * j + 1U];
+      si7 = pCoef[24U * j + 1U];
+      si8 = pCoef[28U * j + 1U];
+
+      i1 = j;
+      P5G_TWIDDLE_BUTTERFLY(64U);
+   }
+
+   for (i1 = 0U; i1 < 512U; i1 += 64U)
+   {
+      P5G_BASE_BUTTERFLY(8U);
+   }
+
+   for (j = 1U; j < 8U; j++)
+   {
+      co2 = pCoef[32U * j];
+      co3 = pCoef[64U * j];
+      co4 = pCoef[96U * j];
+      co5 = pCoef[128U * j];
+      co6 = pCoef[160U * j];
+      co7 = pCoef[192U * j];
+      co8 = pCoef[224U * j];
+      si2 = pCoef[32U * j + 1U];
+      si3 = pCoef[64U * j + 1U];
+      si4 = pCoef[96U * j + 1U];
+      si5 = pCoef[128U * j + 1U];
+      si6 = pCoef[160U * j + 1U];
+      si7 = pCoef[192U * j + 1U];
+      si8 = pCoef[224U * j + 1U];
+
+      for (i1 = j; i1 < 512U; i1 += 64U)
+      {
+         P5G_TWIDDLE_BUTTERFLY(8U);
+      }
+   }
+
+   for (i1 = 0U; i1 < 512U; i1 += 8U)
+   {
+      P5G_BASE_BUTTERFLY(1U);
+   }
+
+#undef P5G_TWIDDLE_BUTTERFLY
+#undef P5G_BASE_BUTTERFLY
+}
+
