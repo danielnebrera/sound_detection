@@ -27,42 +27,6 @@
  */
 
 #include "dsp/transform_functions.h"
-#include "p5_fft_profile.h"
-
-
-static P5FftProfile s_p5_fft_profile = {0};
-
-void p5_fft_profile_reset(void)
-{
-    s_p5_fft_profile = (P5FftProfile){0};
-}
-
-bool p5_fft_profile_get(P5FftProfile *out)
-{
-    if (out == NULL) {
-        return false;
-    }
-
-    *out = s_p5_fft_profile;
-    return true;
-}
-
-void p5_fft_profile_add(P5FftProfileStage stage, uint32_t cycles)
-{
-    if ((uint32_t)stage >= (uint32_t)P5_FFT_STAGE_COUNT) {
-        return;
-    }
-
-    P5FftProfileStageStats *stats = &s_p5_fft_profile.stage[stage];
-
-    stats->total_cycles += (uint64_t)cycles;
-    stats->last_cycles = cycles;
-    stats->runs++;
-
-    if (cycles > stats->max_cycles) {
-        stats->max_cycles = cycles;
-    }
-}
 
 #if defined(ARM_MATH_MVEF) && !defined(ARM_MATH_AUTOVECTORIZE)
 void stage_rfft_f32(
@@ -174,9 +138,9 @@ void stage_rfft_f32(
       vst2q_f32(pOut, res);
       pOut += 8;
 
-    
+
       blockCnt--;
-   } 
+   }
 
    blockCnt = k & 3;
    while (blockCnt > 0)
@@ -245,7 +209,7 @@ void merge_rfft_f32(
         vecStridesBkwd = -vecStridesFwd;
 
         int blockCnt;
-        
+
 
    k = (S->Sint).fftLen - 1;
 
@@ -305,7 +269,7 @@ void merge_rfft_f32(
       vst2q_f32(pOut, res);
       pOut += 8;
 
-    
+
       blockCnt--;
    }
 
@@ -499,7 +463,7 @@ void merge_rfft_f32(
 
 /**
   @defgroup RealFFT Real FFT Functions
- 
+
   @par
                    The CMSIS DSP library includes specialized algorithms for computing the
                    FFT of real data sequences.  The FFT is defined over complex data but
@@ -532,8 +496,8 @@ void merge_rfft_f32(
                    The older functions \ref arm_rfft_f32() and \ref arm_rfft_init_f32() have been deprecated
                    but are still documented.
   @par
-                   The FFT of a real N-point sequence has even symmetry in the frequency domain. 
-                   The second half of the data equals the conjugate of the first half flipped in frequency. 
+                   The FFT of a real N-point sequence has even symmetry in the frequency domain.
+                   The second half of the data equals the conjugate of the first half flipped in frequency.
                    Looking at the data, we see that we can uniquely represent the FFT using only N/2 complex numbers.
                    These are packed into the output array in alternating real and imaginary components:
   @par
@@ -586,7 +550,7 @@ void merge_rfft_f32(
                    <code>pTwiddleAReal</code>points to the A array of twiddle coefficients;
                    <code>pTwiddleBReal</code>points to the B array of twiddle coefficients;
                    <code>pCfft</code> points to the CFFT Instance structure. The CFFT structure
-                   must also be initialized.  
+                   must also be initialized.
 @par
                    Note that with MVE versions you can't initialize instance structures directly and **must
                    use the initialization function**.
@@ -626,32 +590,11 @@ void arm_rfft_fast_f32(
    }
    else
    {
-      const uint32_t rfft_start_cycles = p5_fft_profile_now();
-
-      uint32_t stage_start_cycles = p5_fft_profile_now();
-
       /* Calculation of RFFT of input */
       arm_cfft_f32( Sint, p, ifftFlag, 1);
 
-      p5_fft_profile_add(
-          P5_FFT_STAGE_CFFT_TOTAL,
-          p5_fft_profile_now() - stage_start_cycles
-      );
-
-      stage_start_cycles = p5_fft_profile_now();
-
       /*  Real FFT extraction */
       stage_rfft_f32(S, p, pOut);
-
-      p5_fft_profile_add(
-          P5_FFT_STAGE_RFFT_STAGE,
-          p5_fft_profile_now() - stage_start_cycles
-      );
-
-      p5_fft_profile_add(
-          P5_FFT_STAGE_RFFT_TOTAL,
-          p5_fft_profile_now() - rfft_start_cycles
-      );
    }
 }
 
