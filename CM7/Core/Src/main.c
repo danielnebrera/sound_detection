@@ -20,9 +20,9 @@
 #include "audio_capture.h"
 #include "audio_recorder.h"
 #include "drone_detection.h"
-#include "mfcc_stm32.h"
 #include "model_runner_stm32.h"
 #include "portenta_sdram.h"
+#include "toa_localizer.h"
 #include "stm32h7xx.h"
 
 #include <stdbool.h>
@@ -41,6 +41,7 @@ static void MPU_Config(void);
  * 2: emitir todos los chunks para diagnostico.
  */
 #define LIVE_DETECTION_LOG_MODE     1
+#define TOA1C_TEST_MODE             1
 
 #define LED_ON(pin)     HAL_GPIO_WritePin(GPIOK, pin, GPIO_PIN_RESET)
 #define LED_OFF(pin)    HAL_GPIO_WritePin(GPIOK, pin, GPIO_PIN_SET)
@@ -540,6 +541,52 @@ static void emit_live_detection(
 #endif
 }
 
+static void emit_live_toa(
+    uint32_t order,
+    const ToaResult *result,
+    uint32_t detection_cycles,
+    uint32_t toa_cycles)
+{
+    if (result == NULL)
+    {
+        return;
+    }
+
+    char message[320];
+
+    snprintf(
+        message,
+        sizeof(message),
+        "[TOA] seq=%lu valid=%u dir=%s az=%.2f H=%.2f V=%.2f "
+        "LT=%.2f LB=%.2f LR=%.2f TB=%.2f TR=%.2f BR=%.2f "
+        "cLT=%.3f cLB=%.3f cLR=%.3f cTB=%.3f cTR=%.3f cBR=%.3f "
+        "det_us=%lu toa_us=%lu proc_us=%lu\r\n",
+        (unsigned long)order,
+        (unsigned)result->valid,
+        toa_direction_text(result->direction),
+        (double)result->azimuth_deg,
+        (double)result->h_samples,
+        (double)result->v_samples,
+        (double)result->pair[TOA_PAIR_LEFT_TOP].lag_samples,
+        (double)result->pair[TOA_PAIR_LEFT_BACK].lag_samples,
+        (double)result->pair[TOA_PAIR_LEFT_RIGHT].lag_samples,
+        (double)result->pair[TOA_PAIR_TOP_BACK].lag_samples,
+        (double)result->pair[TOA_PAIR_TOP_RIGHT].lag_samples,
+        (double)result->pair[TOA_PAIR_BACK_RIGHT].lag_samples,
+        (double)result->pair[TOA_PAIR_LEFT_TOP].correlation,
+        (double)result->pair[TOA_PAIR_LEFT_BACK].correlation,
+        (double)result->pair[TOA_PAIR_LEFT_RIGHT].correlation,
+        (double)result->pair[TOA_PAIR_TOP_BACK].correlation,
+        (double)result->pair[TOA_PAIR_TOP_RIGHT].correlation,
+        (double)result->pair[TOA_PAIR_BACK_RIGHT].correlation,
+        (unsigned long)cycles_to_microseconds(detection_cycles),
+        (unsigned long)cycles_to_microseconds(toa_cycles),
+        (unsigned long)cycles_to_microseconds(detection_cycles + toa_cycles)
+    );
+
+    uart_send(message);
+}
+
 static void emit_detection_profile(void)
 {
     DroneDetectionProfile profile = {0};
@@ -708,6 +755,17 @@ static bool process_ready_slot(uint8_t slot)
             return false;
         }
 
+        ToaResult toa_result = {0};
+        const uint32_t toa_start_cycles = DWT->CYCCNT;
+
+        if (!toa_localizer_process(&view, &toa_result))
+        {
+            return false;
+        }
+
+        const uint32_t toa_cycles =
+            DWT->CYCCNT - toa_start_cycles;
+
         const uint32_t result_index = descriptor.record_order - 1U;
         s_record_results[result_index] = result;
         s_record_result_valid[result_index] = true;
@@ -716,6 +774,13 @@ static bool process_ready_slot(uint8_t slot)
             descriptor.record_order,
             &result,
             detection_cycles
+        );
+
+        emit_live_toa(
+            descriptor.record_order,
+            &toa_result,
+            detection_cycles,
+            toa_cycles
         );
     }
 
@@ -940,6 +1005,19 @@ int main(void)
             stop_with_error("[MISSING_DETECTION_RESULT]\r\n");
         }
     }
+
+#if TOA1C_TEST_MODE
+    uart_send("[TOA1C_END] transfer=disabled json=disabled\r\n");
+
+    LED_OFF(LED_RED_Pin);
+    LED_OFF(LED_BLUE_Pin);
+    LED_ON(LED_GREEN_Pin);
+
+    while (1)
+    {
+        HAL_Delay(1000U);
+    }
+#endif
 
     if (!audio_recorder_begin_transfer(recorded_chunks))
     {
