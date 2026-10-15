@@ -43,15 +43,29 @@ typedef struct
     uint8_t reserved;
 } ToaPairResult;
 
+enum
+{
+    TOA_INVALID_NONE = 0U,
+    TOA_INVALID_SEARCH_BOUNDARY = (1U << 0),
+    TOA_INVALID_CLOSURE = (1U << 1)
+};
+
 typedef struct
 {
     ToaPairResult pair[TOA_PAIR_COUNT];
     float h_samples;
     float v_samples;
     float azimuth_deg;
+    float closure_error_samples;
+    float closure_e1_samples;
+    float closure_e2_samples;
+    float closure_e3_samples;
+    float closure_e4_samples;
     ToaDirection direction;
     uint8_t valid;
-    uint8_t reserved[3];
+    uint8_t closure_valid;
+    uint8_t invalid_flags;
+    uint8_t reserved;
 } ToaResult;
 
 bool toa_localizer_process(

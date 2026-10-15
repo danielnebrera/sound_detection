@@ -17,6 +17,7 @@
 #define TOA_MAX_LAG_HORIZONTAL  14
 #define TOA_MAX_LAG_VERTICAL    18
 #define TOA_MAX_LAG_DIAGONAL    22
+#define TOA_CLOSURE_MAX_SAMPLES  1.50f
 
 static float correlation_at_lag(
     const int16_t *a,
@@ -272,15 +273,58 @@ bool toa_localizer_process(
 
     out->azimuth_deg = azimuth;
     out->direction = direction_from_azimuth(azimuth);
-    out->valid = 1U;
+
+    const float lt = out->pair[TOA_PAIR_LEFT_TOP].lag_samples;
+    const float lb = out->pair[TOA_PAIR_LEFT_BACK].lag_samples;
+    const float lr = out->pair[TOA_PAIR_LEFT_RIGHT].lag_samples;
+    const float tb = out->pair[TOA_PAIR_TOP_BACK].lag_samples;
+    const float tr = out->pair[TOA_PAIR_TOP_RIGHT].lag_samples;
+    const float br = out->pair[TOA_PAIR_BACK_RIGHT].lag_samples;
+
+    out->closure_e1_samples = fabsf(lb - lt - tb);
+    out->closure_e2_samples = fabsf(lr - lt - tr);
+    out->closure_e3_samples = fabsf(lr - lb - br);
+    out->closure_e4_samples = fabsf(tr - tb - br);
+
+    float closure_error = out->closure_e1_samples;
+
+    if (out->closure_e2_samples > closure_error)
+    {
+        closure_error = out->closure_e2_samples;
+    }
+    if (out->closure_e3_samples > closure_error)
+    {
+        closure_error = out->closure_e3_samples;
+    }
+    if (out->closure_e4_samples > closure_error)
+    {
+        closure_error = out->closure_e4_samples;
+    }
+
+    out->closure_error_samples = closure_error;
+    out->closure_valid =
+        (closure_error <= TOA_CLOSURE_MAX_SAMPLES) ? 1U : 0U;
+    out->invalid_flags = TOA_INVALID_NONE;
 
     for (uint32_t pair = 0U; pair < TOA_PAIR_COUNT; pair++)
     {
         if (out->pair[pair].peak_at_search_boundary != 0U)
         {
-            out->valid = 0U;
+            out->invalid_flags |= TOA_INVALID_SEARCH_BOUNDARY;
             break;
         }
+    }
+
+    if (out->closure_valid == 0U)
+    {
+        out->invalid_flags |= TOA_INVALID_CLOSURE;
+    }
+
+    out->valid = (out->invalid_flags == TOA_INVALID_NONE) ? 1U : 0U;
+
+    if (out->valid == 0U)
+    {
+        out->direction = TOA_DIRECTION_UNKNOWN;
     }
 
     return true;

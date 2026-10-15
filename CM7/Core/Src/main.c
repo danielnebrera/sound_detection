@@ -3,7 +3,7 @@
  *
  * Flujo:
  *   1. Inicializa SDRAM y detector antes de capturar.
- *   2. SAI/DMA copia cada par A/B directamente al ring PCM16 en SDRAM.
+ *   2. SAI/DMA llena buffers D2; la ruta de captura publica PCM16 en el ring SDRAM.
  *   3. Cada segundo exacto se publica como slot READY.
  *   4. main procesa MFCC/TFLite mientras DMA captura el siguiente segundo.
  *   5. Ctrl+C llega por interrupcion UART y cierra en el proximo segundo.
@@ -41,7 +41,7 @@ static void MPU_Config(void);
  * 2: emitir todos los chunks para diagnostico.
  */
 #define LIVE_DETECTION_LOG_MODE     1
-#define TOA1C_TEST_MODE             1
+#define TOA1D2_TEST_MODE            1
 
 #define LED_ON(pin)     HAL_GPIO_WritePin(GPIOK, pin, GPIO_PIN_RESET)
 #define LED_OFF(pin)    HAL_GPIO_WritePin(GPIOK, pin, GPIO_PIN_SET)
@@ -552,21 +552,30 @@ static void emit_live_toa(
         return;
     }
 
-    char message[320];
+    char message[448];
 
     snprintf(
         message,
         sizeof(message),
-        "[TOA] seq=%lu valid=%u dir=%s az=%.2f H=%.2f V=%.2f "
+        "[TOA] seq=%lu valid=%u cvalid=%u flags=0x%02X dir=%s "
+        "az=%.2f H=%.2f V=%.2f cl=%.2f "
+        "e1=%.2f e2=%.2f e3=%.2f e4=%.2f "
         "LT=%.2f LB=%.2f LR=%.2f TB=%.2f TR=%.2f BR=%.2f "
         "cLT=%.3f cLB=%.3f cLR=%.3f cTB=%.3f cTR=%.3f cBR=%.3f "
         "det_us=%lu toa_us=%lu proc_us=%lu\r\n",
         (unsigned long)order,
         (unsigned)result->valid,
+        (unsigned)result->closure_valid,
+        (unsigned)result->invalid_flags,
         toa_direction_text(result->direction),
         (double)result->azimuth_deg,
         (double)result->h_samples,
         (double)result->v_samples,
+        (double)result->closure_error_samples,
+        (double)result->closure_e1_samples,
+        (double)result->closure_e2_samples,
+        (double)result->closure_e3_samples,
+        (double)result->closure_e4_samples,
         (double)result->pair[TOA_PAIR_LEFT_TOP].lag_samples,
         (double)result->pair[TOA_PAIR_LEFT_BACK].lag_samples,
         (double)result->pair[TOA_PAIR_LEFT_RIGHT].lag_samples,
@@ -583,6 +592,85 @@ static void emit_live_toa(
         (unsigned long)cycles_to_microseconds(toa_cycles),
         (unsigned long)cycles_to_microseconds(detection_cycles + toa_cycles)
     );
+
+    uart_send(message);
+}
+
+static void emit_operational_target(
+    uint32_t order,
+    const DroneDetectionResult *detection,
+    const ToaResult *toa,
+    uint32_t detection_cycles,
+    uint32_t toa_cycles)
+{
+    if (detection == NULL)
+    {
+        return;
+    }
+
+    char message[256];
+
+    if (detection->alert_level == 0U)
+    {
+        snprintf(
+            message,
+            sizeof(message),
+            "[TARGET] seq=%lu detected=0 alert=0 toa=NOT_EVALUATED "
+            "loc_valid=0 dir=NONE az=NA cl=NA "
+            "det_us=%lu toa_us=0 proc_us=%lu\r\n",
+            (unsigned long)order,
+            (unsigned long)cycles_to_microseconds(detection_cycles),
+            (unsigned long)cycles_to_microseconds(detection_cycles)
+        );
+
+        uart_send(message);
+        return;
+    }
+
+    if (toa == NULL)
+    {
+        return;
+    }
+
+    if (toa->valid != 0U)
+    {
+        snprintf(
+            message,
+            sizeof(message),
+            "[TARGET] seq=%lu detected=1 alert=%u toa=VALID "
+            "loc_valid=1 dir=%s az=%.2f cl=%.2f "
+            "det_us=%lu toa_us=%lu proc_us=%lu\r\n",
+            (unsigned long)order,
+            (unsigned)detection->alert_level,
+            toa_direction_text(toa->direction),
+            (double)toa->azimuth_deg,
+            (double)toa->closure_error_samples,
+            (unsigned long)cycles_to_microseconds(detection_cycles),
+            (unsigned long)cycles_to_microseconds(toa_cycles),
+            (unsigned long)cycles_to_microseconds(
+                detection_cycles + toa_cycles
+            )
+        );
+    }
+    else
+    {
+        snprintf(
+            message,
+            sizeof(message),
+            "[TARGET] seq=%lu detected=1 alert=%u toa=INVALID "
+            "loc_valid=0 dir=UNKNOWN az=NA cl=%.2f flags=0x%02X "
+            "det_us=%lu toa_us=%lu proc_us=%lu\r\n",
+            (unsigned long)order,
+            (unsigned)detection->alert_level,
+            (double)toa->closure_error_samples,
+            (unsigned)toa->invalid_flags,
+            (unsigned long)cycles_to_microseconds(detection_cycles),
+            (unsigned long)cycles_to_microseconds(toa_cycles),
+            (unsigned long)cycles_to_microseconds(
+                detection_cycles + toa_cycles
+            )
+        );
+    }
 
     uart_send(message);
 }
@@ -755,17 +843,6 @@ static bool process_ready_slot(uint8_t slot)
             return false;
         }
 
-        ToaResult toa_result = {0};
-        const uint32_t toa_start_cycles = DWT->CYCCNT;
-
-        if (!toa_localizer_process(&view, &toa_result))
-        {
-            return false;
-        }
-
-        const uint32_t toa_cycles =
-            DWT->CYCCNT - toa_start_cycles;
-
         const uint32_t result_index = descriptor.record_order - 1U;
         s_record_results[result_index] = result;
         s_record_result_valid[result_index] = true;
@@ -776,12 +853,44 @@ static bool process_ready_slot(uint8_t slot)
             detection_cycles
         );
 
-        emit_live_toa(
-            descriptor.record_order,
-            &toa_result,
-            detection_cycles,
-            toa_cycles
-        );
+        if (result.alert_level == 0U)
+        {
+            emit_operational_target(
+                descriptor.record_order,
+                &result,
+                NULL,
+                detection_cycles,
+                0U
+            );
+        }
+        else
+        {
+            ToaResult toa_result = {0};
+            const uint32_t toa_start_cycles = DWT->CYCCNT;
+
+            if (!toa_localizer_process(&view, &toa_result))
+            {
+                return false;
+            }
+
+            const uint32_t toa_cycles =
+                DWT->CYCCNT - toa_start_cycles;
+
+            emit_live_toa(
+                descriptor.record_order,
+                &toa_result,
+                detection_cycles,
+                toa_cycles
+            );
+
+            emit_operational_target(
+                descriptor.record_order,
+                &result,
+                &toa_result,
+                detection_cycles,
+                toa_cycles
+            );
+        }
     }
 
     return audio_recorder_complete_processing(slot, detection_cycles);
@@ -888,7 +997,7 @@ int main(void)
 
     uart_send(
         "[CAPTURE_STARTED] calibration=3 max_record=16 "
-        "stop_at_second_boundary=1 detection=concurrent\r\n"
+        "stop_at_second_boundary=1 detection=concurrent toa_gate=alert_gt_0\r\n"
     );
 
     if (!start_audio_capture())
@@ -1006,8 +1115,8 @@ int main(void)
         }
     }
 
-#if TOA1C_TEST_MODE
-    uart_send("[TOA1C_END] transfer=disabled json=disabled\r\n");
+#if TOA1D2_TEST_MODE
+    uart_send("[TOA1D2_END] transfer=disabled json=disabled\r\n");
 
     LED_OFF(LED_RED_Pin);
     LED_OFF(LED_BLUE_Pin);

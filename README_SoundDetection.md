@@ -3586,3 +3586,330 @@ localizaciones incoherentes no se publican como válidas
 ```
 
 El objetivo posterior será evolucionar desde la sesión finita de 16 órdenes hacia captura continua con inicio/STOP controlado y salida de dirección para el subsistema downstream.
+
+---
+
+## 53. TOA-1D.1 — validación geométrica de los seis TDOA
+
+TOA-1D.1 incorpora una validación de coherencia geométrica sobre los seis TDOA calculados por el localizador.
+
+La ventana TOA, la correlación, la interpolación submuestra, los límites de búsqueda y el cálculo de `H`, `V` y azimuth se mantienen sin cambios respecto a TOA-1C.2.
+
+Configuración mantenida:
+
+```text
+ventana TOA              = 100 ms centrales
+muestras TOA             = 4410
+lag horizontal           = ±14
+lag vertical             = ±18
+lag diagonal             = ±22
+correlación              = sin cambios
+interpolación submuestra = sin cambios
+```
+
+Se añadieron las siguientes relaciones de cierre:
+
+```text
+e1 = |LB - LT - TB|
+e2 = |LR - LT - TR|
+e3 = |LR - LB - BR|
+e4 = |TR - TB - BR|
+
+closure_error = max(e1, e2, e3, e4)
+```
+
+El umbral utilizado para esta etapa fue:
+
+```text
+TOA_CLOSURE_MAX_SAMPLES = 1.50
+```
+
+Semántica:
+
+```text
+closure_error <= 1.50
+    -> localización geométricamente coherente
+    -> cvalid=1
+
+closure_error > 1.50
+    -> localización geométricamente incoherente
+    -> cvalid=0
+    -> valid=0
+    -> dir=UNKNOWN
+```
+
+Flags utilizados:
+
+```text
+0x00 = válido
+0x01 = pico en límite de búsqueda
+0x02 = closure incoherente
+0x03 = ambos problemas
+```
+
+### 53.1 Build
+
+Resultado del build de TOA-1D.1:
+
+```text
+text    = 902512 B
+data    = 512 B
+bss     = 451824 B
+
+0 errors
+0 warnings
+```
+
+Comparado con TOA-1C.2:
+
+```text
+FLASH text: +376 B
+data:        +0 B
+bss:         +0 B
+```
+
+La validación de closure no añadió RAM estática.
+
+### 53.2 Validación 90° RIGHT
+
+Resultado de 16 órdenes:
+
+```text
+14 -> valid=1, cvalid=1, dir=RIGHT
+ 2 -> valid=0, cvalid=0, dir=UNKNOWN
+```
+
+Cluster válido:
+
+```text
+azimuth medio = 101.28°
+std azimuth   = 0.50°
+rango         = 100.52°–102.45°
+
+H medio       = -8.784 samples
+V medio       = -2.336 samples
+
+closure medio         = 0.258 samples
+closure máximo válido = 0.40 samples
+```
+
+Los dos casos incoherentes fueron rechazados correctamente:
+
+```text
+seq1  -> closure=10.61 -> UNKNOWN
+seq16 -> closure=12.02 -> UNKNOWN
+```
+
+Uno de los casos presentaba correlaciones individuales altas, demostrando que una correlación alta no garantiza por sí sola una solución TDOA físicamente coherente.
+
+### 53.3 Validación 270° LEFT
+
+Resultado de 16 órdenes:
+
+```text
+9 -> valid=1, cvalid=1, dir=LEFT
+7 -> valid=0, cvalid=0, dir=UNKNOWN
+```
+
+Cluster válido:
+
+```text
+azimuth medio = 271.56°
+std azimuth   = 1.22°
+rango         = 269.49°–273.40°
+
+H medio       = +8.388 samples
+V medio       = +0.302 samples
+
+closure medio         = 0.71 samples
+closure máximo válido = 1.18 samples
+```
+
+Las ventanas incoherentes presentaron:
+
+```text
+closure inválido ≈ 7.63–9.83 samples
+closure válido <= 1.18 samples
+threshold       = 1.50 samples
+```
+
+El umbral de `1.50 samples` se mantiene sin cambios.
+
+### 53.4 Estado TOA-1D.1
+
+```text
+closure geométrico        = PASS
+rechazo de picos falsos   = PASS
+dirección válida          = PASS
+real-time                 = PASS
+queue_high                = 1
+errors                    = 0
+```
+
+TOA-1D.1 queda cerrado como etapa validada.
+
+---
+
+## 54. TOA-1D.2 — integración operacional detector + localización
+
+TOA-1D.2 integra la decisión del detector con el localizador TOA.
+
+El detector procesa primero el bloque PCM16 y genera un `alert_level`. A partir de ese estado se decide si el TOA debe evaluarse.
+
+### 54.1 Semántica de `alert_level`
+
+La semántica utilizada por el detector es:
+
+```text
+alert_level = 0 -> sin alerta
+alert_level = 1 -> alerta mantenida
+alert_level = 2 -> dron lejano
+alert_level = 3 -> dron cercano
+```
+
+Para la lógica operacional de TOA-1D.2:
+
+```text
+alert_level == 0
+    -> no hay target operativo
+    -> TOA NO EVALUADO
+
+alert_level > 0
+    -> hay target detectado
+    -> se evalúa TOA
+```
+
+Es importante distinguir:
+
+```text
+TOA NO EVALUADO
+```
+
+de:
+
+```text
+TOA EVALUADO PERO INVÁLIDO
+```
+
+`NOT_EVALUATED` no representa una probabilidad cero, un azimuth de `0°` ni una localización fallida. Significa que el localizador no fue ejecutado porque el detector no declaró un target operativo.
+
+### 54.2 Estados operacionales
+
+TOA-1D.2 define tres respuestas principales:
+
+```text
+1. NO_TARGET
+
+2. TARGET + LOCALIZATION_VALID
+   -> azimuth válido
+   -> dirección válida
+
+3. TARGET + LOCALIZATION_INVALID
+   -> target detectado
+   -> dirección UNKNOWN
+```
+
+Cuando existe alerta y se ejecuta TOA, se mantiene exactamente la configuración validada en TOA-1D.1:
+
+```text
+ventana TOA       = 100 ms centrales
+closure threshold = 1.50 samples
+```
+
+La localización sólo se publica como válida cuando supera la validación geométrica.
+
+### 54.3 Diagrama de flujo TOA
+
+El siguiente diagrama resume el comportamiento operacional del sistema desde la entrada de sonido hasta la respuesta de localización.
+
+![Diagrama de flujo TOA](./Diagrama%20de%20flujo%20TOA.png)
+
+### 54.4 Comportamiento esperado por UART
+
+Sin alerta:
+
+```text
+[LIVE_DET] ... alert=0 ...
+[TARGET] ... detected=0 alert=0 toa=NOT_EVALUATED loc_valid=0 dir=NONE az=NA ... toa_us=0 ...
+```
+
+En este estado no debe publicarse una localización TOA operacional.
+
+Con target y localización válida:
+
+```text
+[LIVE_DET] ... alert>0 ...
+[TOA] ... valid=1 cvalid=1 flags=0x00 ...
+[TARGET] ... detected=1 toa=VALID loc_valid=1 dir=<DIR> az=<AZIMUTH> ...
+```
+
+Con target pero localización incoherente:
+
+```text
+[LIVE_DET] ... alert>0 ...
+[TOA] ... valid=0 cvalid=0 flags=0x02 ...
+[TARGET] ... detected=1 toa=INVALID loc_valid=0 dir=UNKNOWN az=NA ...
+```
+
+### 54.5 Objetivo temporal
+
+Cuando `alert_level == 0`, el TOA no se ejecuta y se evita su coste aproximado de 313 ms.
+
+Objetivo esperado:
+
+```text
+sin alerta:
+proc_us ≈ tiempo del detector
+
+con alerta:
+proc_us ≈ detector + TOA
+```
+
+En ambos casos debe mantenerse:
+
+```text
+proc_us < 1,000,000
+queue_high estable
+errors = 0
+```
+
+### 54.6 Estado actual
+
+TOA-1D.2 está preparado para validación experimental.
+
+```text
+integración detector -> TOA = implementada
+semántica NO_TARGET         = definida
+semántica NOT_EVALUATED     = definida
+closure <= 1.50             = mantenido
+runtime 90° RIGHT           = PENDIENTE
+push al repositorio         = PENDIENTE hasta validar
+```
+
+Primera prueba prevista:
+
+```text
+90° RIGHT
+distancia aproximada = 50 cm
+16 órdenes
+```
+
+Criterios de aceptación:
+
+```text
+alert=0:
+    TOA no evaluado
+    toa_us=0
+
+alert>0 + closure válido:
+    TARGET + LOCALIZATION_VALID
+
+alert>0 + closure inválido:
+    TARGET + LOCALIZATION_INVALID
+    dir=UNKNOWN
+
+queue_high = 1
+errors = 0
+proc_us < 1,000,000
+```
+
