@@ -7,7 +7,7 @@
  *   DMA A/B -> desentrelaza -> PCM16 -> slot SDRAM -> cola READY
  *
  * Consumidor (main):
- *   cola READY -> DSP/MFCC/TFLite -> libera calibracion o retiene audio
+ *   cola READY -> DSP/MFCC/TFLite/TOA -> libera siempre el slot
  * ================================================================= */
 
 #include "audio_recorder.h"
@@ -15,6 +15,14 @@
 #include "portenta_sdram.h"
 #include "usart.h"
 #include "main.h"
+
+#if !defined(AUDIO_RECORDER_LIVE_MODE) || (AUDIO_RECORDER_LIVE_MODE != 1U)
+#error "audio_recorder.c requires LIVE mode header"
+#endif
+
+#if !defined(AUDIO_RECORDER_LIVE_API_REV) || (AUDIO_RECORDER_LIVE_API_REV != 0x0001E102UL)
+#error "audio_recorder.c/header LIVE API revision mismatch"
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -72,9 +80,6 @@ static volatile AudioChunkDescriptor s_descriptors[AUDIO_RING_SLOT_COUNT];
 static uint8_t s_ready_slots[AUDIO_RING_SLOT_COUNT];
 static volatile uint32_t s_ready_head = 0U;
 static volatile uint32_t s_ready_tail = 0U;
-
-/* Mapa estable record_chunk -> slot fisico retenido. */
-static uint8_t s_record_slots[RECORD_MAX_OUTPUT_CHUNKS];
 
 static volatile uint8_t s_write_slot = AUDIO_SLOT_INVALID;
 static volatile uint32_t s_frame_in_slot = 0U;
@@ -225,17 +230,12 @@ static bool publish_completed_slot_from_isr(uint8_t slot)
 
     descriptor->last_frame = descriptor->first_frame + RECORD_FRAMES - 1U;
 
-    if ((descriptor->flags & AUDIO_SLOT_FLAG_RECORD) != 0U)
-    {
-        if (s_recorded_chunks >= RECORD_MAX_OUTPUT_CHUNKS)
-        {
-            return false;
-        }
+    const bool is_record =
+        (descriptor->flags & AUDIO_SLOT_FLAG_RECORD) != 0U;
 
-        const uint32_t record_index = s_recorded_chunks;
-        descriptor->record_order = record_index + 1U;
-        s_record_slots[record_index] = slot;
-        s_recorded_chunks = record_index + 1U;
+    if (is_record)
+    {
+        descriptor->record_order = s_recorded_chunks + 1U;
     }
 
     descriptor->state = AUDIO_SLOT_READY;
@@ -246,18 +246,18 @@ static bool publish_completed_slot_from_isr(uint8_t slot)
         return false;
     }
 
+    if (is_record)
+    {
+        s_recorded_chunks++;
+    }
+
     s_chunks_completed++;
     return true;
 }
 
 static bool should_close_on_boundary(void)
 {
-    if (s_recorded_chunks >= RECORD_MAX_OUTPUT_CHUNKS)
-    {
-        return true;
-    }
-
-    return s_stop_requested && (s_recorded_chunks >= 1U);
+    return s_stop_requested;
 }
 
 static void copy_frames_to_sdram_from_isr(
@@ -322,11 +322,6 @@ void audio_recorder_init(void)
         s_ready_slots[slot] = AUDIO_SLOT_INVALID;
     }
 
-    for (uint32_t i = 0U; i < RECORD_MAX_OUTPUT_CHUNKS; i++)
-    {
-        s_record_slots[i] = AUDIO_SLOT_INVALID;
-    }
-
     s_ready_head = 0U;
     s_ready_tail = 0U;
     s_write_slot = AUDIO_SLOT_INVALID;
@@ -369,6 +364,16 @@ bool audio_recorder_start_session(void)
     s_next_sequence = 1U;
     s_session_active = true;
     return true;
+}
+
+bool audio_recorder_is_free_running(void)
+{
+    return true;
+}
+
+uint32_t audio_recorder_runtime_api_revision(void)
+{
+    return 0x0001E102UL;
 }
 
 bool audio_recorder_on_dma_pair_from_isr(
@@ -432,12 +437,7 @@ bool audio_recorder_on_dma_pair_from_isr(
 
             if (should_close_on_boundary())
             {
-                const AudioRecorderCloseReason reason =
-                    s_stop_requested
-                        ? AUDIO_CLOSE_STOP_REQUESTED
-                        : AUDIO_CLOSE_CAPACITY_REACHED;
-
-                close_capture_from_isr(reason);
+                close_capture_from_isr(AUDIO_CLOSE_STOP_REQUESTED);
                 break;
             }
 
@@ -651,17 +651,8 @@ bool audio_recorder_complete_processing(
 
     s_chunks_detected++;
 
-    if ((s_descriptors[slot_index].flags &
-         AUDIO_SLOT_FLAG_CALIBRATION) != 0U)
-    {
-        __DMB();
-        reset_descriptor(slot_index);
-    }
-    else
-    {
-        s_descriptors[slot_index].state = AUDIO_SLOT_PROCESSED;
-        __DMB();
-    }
+    __DMB();
+    reset_descriptor(slot_index);
 
     return true;
 }
@@ -680,33 +671,18 @@ bool audio_recorder_get_record_chunk_view(
     uint32_t record_chunk,
     RecorderChunkView *view)
 {
-    if ((record_chunk >= s_recorded_chunks) || (view == NULL))
-    {
-        return false;
-    }
-
-    const uint8_t slot = s_record_slots[record_chunk];
-
-    if ((slot >= AUDIO_RING_SLOT_COUNT) ||
-        (s_descriptors[slot].state != AUDIO_SLOT_PROCESSED))
-    {
-        return false;
-    }
-
-    return audio_recorder_get_slot_view(slot, view);
+    (void)record_chunk;
+    (void)view;
+    return false;
 }
 
 bool audio_recorder_get_record_descriptor(
     uint32_t record_chunk,
     AudioChunkDescriptor *descriptor)
 {
-    if ((record_chunk >= s_recorded_chunks) || (descriptor == NULL))
-    {
-        return false;
-    }
-
-    const uint8_t slot = s_record_slots[record_chunk];
-    return audio_recorder_get_slot_descriptor(slot, descriptor);
+    (void)record_chunk;
+    (void)descriptor;
+    return false;
 }
 
 void audio_recorder_get_stats(AudioRecorderStats *stats)

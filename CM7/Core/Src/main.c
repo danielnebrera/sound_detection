@@ -6,8 +6,9 @@
  *   2. SAI/DMA llena buffers D2; la ruta de captura publica PCM16 en el ring SDRAM.
  *   3. Cada segundo exacto se publica como slot READY.
  *   4. main procesa MFCC/TFLite mientras DMA captura el siguiente segundo.
- *   5. Ctrl+C llega por interrupcion UART y cierra en el proximo segundo.
- *   6. Al cerrar, transmite con ACK por bloque y fallback adaptativo.
+ *   5. La captura continua sin limite de ordenes.
+ *   6. STOP por UART cierra exactamente al terminar el segundo en curso.
+ *   7. No se retiene ni transfiere audio: cada slot procesado vuelve a FREE.
  * ================================================================= */
 
 #include "main.h"
@@ -19,6 +20,22 @@
 
 #include "audio_capture.h"
 #include "audio_recorder.h"
+
+#ifndef AUDIO_RECORDER_LIVE_MODE
+#error "TOA-1E requires the LIVE audio_recorder.h"
+#endif
+
+#if (AUDIO_RECORDER_LIVE_MODE != 1U)
+#error "TOA-1E requires AUDIO_RECORDER_LIVE_MODE=1"
+#endif
+
+#ifndef AUDIO_RECORDER_LIVE_API_REV
+#error "TOA-1E requires AUDIO_RECORDER_LIVE_API_REV"
+#endif
+
+#if (AUDIO_RECORDER_LIVE_API_REV != 0x0001E102UL)
+#error "TOA-1E main/audio_recorder.h LIVE API revision mismatch"
+#endif
 #include "drone_detection.h"
 #include "model_runner_stm32.h"
 #include "portenta_sdram.h"
@@ -40,16 +57,22 @@ static void MPU_Config(void);
  * 1: emitir solo actividad acustica o alerta (recomendado).
  * 2: emitir todos los chunks para diagnostico.
  */
-#define LIVE_DETECTION_LOG_MODE     1
-#define TOA1D2_TEST_MODE            1
+#define LIVE_DETECTION_LOG_MODE     2
 
 #define LED_ON(pin)     HAL_GPIO_WritePin(GPIOK, pin, GPIO_PIN_RESET)
 #define LED_OFF(pin)    HAL_GPIO_WritePin(GPIOK, pin, GPIO_PIN_SET)
 #define LED_TOGGLE(pin) HAL_GPIO_TogglePin(GPIOK, pin)
 
 static bool s_audio_running = false;
-static DroneDetectionResult s_record_results[RECORD_MAX_OUTPUT_CHUNKS];
-static bool s_record_result_valid[RECORD_MAX_OUTPUT_CHUNKS];
+static uint32_t s_toa_cycles_max = 0U;
+static uint32_t s_processing_cycles_max = 0U;
+static uint32_t s_no_target_count = 0U;
+static uint32_t s_target_valid_count = 0U;
+static uint32_t s_target_invalid_count = 0U;
+static uint32_t s_conf_high_count = 0U;
+static uint32_t s_conf_medium_count = 0U;
+static uint32_t s_conf_low_count = 0U;
+static uint32_t s_track_eligible_count = 0U;
 
 typedef struct
 {
@@ -378,8 +401,9 @@ static bool configure_microphone_power(void)
 static bool wait_for_record_command(void)
 {
     uart_send(
-        "[RECORD_READY] calibration=3 max_record=16 "
-        "sample_rate=44100 channels=4 mode=producer_consumer\r\n"
+        "[RECORD_READY] calibration=3 max_record=unlimited "
+        "sample_rate=44100 channels=4 mode=producer_consumer_live "
+        "stop_command=S\r\n"
     );
 
     while (1)
@@ -449,53 +473,6 @@ static uint8_t bit_mask_from_flags(const uint8_t flags[RECORD_CHANNELS])
     return mask;
 }
 
-static void format_detection_line(
-    char *destination,
-    size_t destination_size,
-    uint32_t order,
-    const DroneDetectionResult *result)
-{
-    if ((destination == NULL) ||
-        (destination_size == 0U) ||
-        (result == NULL))
-    {
-        return;
-    }
-
-    const uint8_t valid_mask = bit_mask_from_flags(result->valid);
-    const uint8_t active_mask =
-        bit_mask_from_flags(result->acoustic_active);
-
-    snprintf(
-        destination,
-        destination_size,
-        "[DET_RESULT] order=%lu alert=%u baseline=%u "
-        "fused=%.6f ema=%.6f valid=0x%02X active=0x%02X "
-        "p0=%.6f p1=%.6f p2=%.6f p3=%.6f "
-        "db0=%.3f db1=%.3f db2=%.3f db3=%.3f "
-        "delta0=%.3f delta1=%.3f delta2=%.3f delta3=%.3f\r\n",
-        (unsigned long)order,
-        (unsigned)result->alert_level,
-        (unsigned)result->baseline_ready,
-        (double)result->fused_probability,
-        (double)result->ema,
-        (unsigned)valid_mask,
-        (unsigned)active_mask,
-        (double)result->probability[0],
-        (double)result->probability[1],
-        (double)result->probability[2],
-        (double)result->probability[3],
-        (double)result->dbfs[0],
-        (double)result->dbfs[1],
-        (double)result->dbfs[2],
-        (double)result->dbfs[3],
-        (double)result->delta_dbfs[0],
-        (double)result->delta_dbfs[1],
-        (double)result->delta_dbfs[2],
-        (double)result->delta_dbfs[3]
-    );
-}
-
 static void emit_live_detection(
     uint32_t order,
     const DroneDetectionResult *result,
@@ -522,17 +499,29 @@ static void emit_live_detection(
     }
 #endif
 
-    char message[192];
+    float rel_db_max = result->delta_dbfs[0];
+
+    for (uint32_t channel = 1U; channel < RECORD_CHANNELS; channel++)
+    {
+        if (result->delta_dbfs[channel] > rel_db_max)
+        {
+            rel_db_max = result->delta_dbfs[channel];
+        }
+    }
+
+    char message[224];
 
     snprintf(
         message,
         sizeof(message),
         "[LIVE_DET] order=%lu alert=%u fused=%.4f ema=%.4f "
-        "active=0x%02X det_us=%lu\r\n",
+        "rel_db=%.2f baseline=%u active=0x%02X det_us=%lu\r\n",
         (unsigned long)order,
         (unsigned)result->alert_level,
         (double)result->fused_probability,
         (double)result->ema,
+        (double)rel_db_max,
+        (unsigned)result->baseline_ready,
         (unsigned)active_mask,
         (unsigned long)cycles_to_microseconds(detection_cycles)
     );
@@ -596,6 +585,214 @@ static void emit_live_toa(
     uart_send(message);
 }
 
+static const char *toa_pair_text(ToaPair pair)
+{
+    switch (pair)
+    {
+        case TOA_PAIR_LEFT_TOP:
+            return "LT";
+        case TOA_PAIR_LEFT_BACK:
+            return "LB";
+        case TOA_PAIR_LEFT_RIGHT:
+            return "LR";
+        case TOA_PAIR_TOP_BACK:
+            return "TB";
+        case TOA_PAIR_TOP_RIGHT:
+            return "TR";
+        case TOA_PAIR_BACK_RIGHT:
+            return "BR";
+        default:
+            return "??";
+    }
+}
+
+static void emit_toa_peak_diagnostics(
+    uint32_t order,
+    const ToaResult *result)
+{
+    if (result == NULL)
+    {
+        return;
+    }
+
+    for (uint32_t pair_index = 0U;
+         pair_index < TOA_PAIR_COUNT;
+         pair_index++)
+    {
+        const ToaPairResult *pair = &result->pair[pair_index];
+        char message[320];
+        int offset = snprintf(
+            message,
+            sizeof(message),
+            "[TOA_PEAKS] seq=%lu pair=%s",
+            (unsigned long)order,
+            toa_pair_text((ToaPair)pair_index)
+        );
+
+        if ((offset < 0) || ((size_t)offset >= sizeof(message)))
+        {
+            continue;
+        }
+
+        for (uint32_t candidate_index = 0U;
+             candidate_index < TOA_PEAK_CANDIDATE_COUNT;
+             candidate_index++)
+        {
+            const ToaPeakCandidate *candidate =
+                &pair->candidate[candidate_index];
+
+            if (candidate->valid != 0U)
+            {
+                const int written = snprintf(
+                    message + offset,
+                    sizeof(message) - (size_t)offset,
+                    " p%lu=%.2f/%d/%.3f/%u",
+                    (unsigned long)(candidate_index + 1U),
+                    (double)candidate->lag_samples,
+                    (int)candidate->integer_lag,
+                    (double)candidate->correlation,
+                    (unsigned)candidate->peak_at_search_boundary
+                );
+
+                if ((written < 0) ||
+                    ((size_t)written >= (sizeof(message) - (size_t)offset)))
+                {
+                    offset = -1;
+                    break;
+                }
+
+                offset += written;
+            }
+            else
+            {
+                const int written = snprintf(
+                    message + offset,
+                    sizeof(message) - (size_t)offset,
+                    " p%lu=NA",
+                    (unsigned long)(candidate_index + 1U)
+                );
+
+                if ((written < 0) ||
+                    ((size_t)written >= (sizeof(message) - (size_t)offset)))
+                {
+                    offset = -1;
+                    break;
+                }
+
+                offset += written;
+            }
+        }
+
+        if (offset < 0)
+        {
+            continue;
+        }
+
+        snprintf(
+            message + offset,
+            sizeof(message) - (size_t)offset,
+            "\r\n"
+        );
+        uart_send(message);
+    }
+}
+
+
+static void emit_toa_solver_diagnostics(
+    uint32_t order,
+    const ToaResult *result)
+{
+    if (result == NULL)
+    {
+        return;
+    }
+
+    char message[320];
+
+    snprintf(
+        message,
+        sizeof(message),
+        "[TOA_SOLVER] seq=%lu raw_valid=%u used=%u recovered=%u "
+        "raw_cl=%.2f final_cl=%.2f raw_score=%.3f final_score=%.3f "
+        "ratio=%.3f tested=%u accepted=%u "
+        "sel=%u,%u,%u,%u,%u,%u\r\n",
+        (unsigned long)order,
+        (unsigned)result->raw_valid,
+        (unsigned)result->solver_used,
+        (unsigned)result->solver_recovered,
+        (double)result->raw_closure_error_samples,
+        (double)result->closure_error_samples,
+        (double)result->solver_raw_score,
+        (double)result->solver_selected_score,
+        (double)result->solver_score_ratio,
+        (unsigned)result->solver_combinations_tested,
+        (unsigned)result->solver_valid_combinations,
+        (unsigned)result->selected_candidate[TOA_PAIR_LEFT_TOP],
+        (unsigned)result->selected_candidate[TOA_PAIR_LEFT_BACK],
+        (unsigned)result->selected_candidate[TOA_PAIR_LEFT_RIGHT],
+        (unsigned)result->selected_candidate[TOA_PAIR_TOP_BACK],
+        (unsigned)result->selected_candidate[TOA_PAIR_TOP_RIGHT],
+        (unsigned)result->selected_candidate[TOA_PAIR_BACK_RIGHT]
+    );
+
+    uart_send(message);
+}
+
+static void emit_toa_confidence(
+    uint32_t order,
+    const ToaResult *result)
+{
+    if (result == NULL)
+    {
+        return;
+    }
+
+    char message[256];
+
+    if (result->confidence_gap_pair_count != 0U)
+    {
+        snprintf(
+            message,
+            sizeof(message),
+            "[TOA_CONF] seq=%lu level=%s track=%u amb=%u gap_min=%.3f "
+            "gap_pairs=%u corr_min=%.3f corr_mean=%.3f cl=%.2f "
+            "solver=%u ratio=%.3f\r\n",
+            (unsigned long)order,
+            toa_confidence_text(result->confidence),
+            (unsigned)result->track_eligible,
+            (unsigned)result->confidence_ambiguous_pairs,
+            (double)result->confidence_peak_gap_min,
+            (unsigned)result->confidence_gap_pair_count,
+            (double)result->confidence_selected_corr_min,
+            (double)result->confidence_selected_corr_mean,
+            (double)result->closure_error_samples,
+            (unsigned)result->solver_used,
+            (double)result->solver_score_ratio
+        );
+    }
+    else
+    {
+        snprintf(
+            message,
+            sizeof(message),
+            "[TOA_CONF] seq=%lu level=%s track=%u amb=%u gap_min=NA "
+            "gap_pairs=0 corr_min=%.3f corr_mean=%.3f cl=%.2f "
+            "solver=%u ratio=%.3f\r\n",
+            (unsigned long)order,
+            toa_confidence_text(result->confidence),
+            (unsigned)result->track_eligible,
+            (unsigned)result->confidence_ambiguous_pairs,
+            (double)result->confidence_selected_corr_min,
+            (double)result->confidence_selected_corr_mean,
+            (double)result->closure_error_samples,
+            (unsigned)result->solver_used,
+            (double)result->solver_score_ratio
+        );
+    }
+
+    uart_send(message);
+}
+
 static void emit_operational_target(
     uint32_t order,
     const DroneDetectionResult *detection,
@@ -616,7 +813,7 @@ static void emit_operational_target(
             message,
             sizeof(message),
             "[TARGET] seq=%lu detected=0 alert=0 toa=NOT_EVALUATED "
-            "loc_valid=0 dir=NONE az=NA cl=NA "
+            "loc_valid=0 dir=NONE az=NA cl=NA conf=NONE track=0 "
             "det_us=%lu toa_us=0 proc_us=%lu\r\n",
             (unsigned long)order,
             (unsigned long)cycles_to_microseconds(detection_cycles),
@@ -638,13 +835,15 @@ static void emit_operational_target(
             message,
             sizeof(message),
             "[TARGET] seq=%lu detected=1 alert=%u toa=VALID "
-            "loc_valid=1 dir=%s az=%.2f cl=%.2f "
+            "loc_valid=1 dir=%s az=%.2f cl=%.2f conf=%s track=%u "
             "det_us=%lu toa_us=%lu proc_us=%lu\r\n",
             (unsigned long)order,
             (unsigned)detection->alert_level,
             toa_direction_text(toa->direction),
             (double)toa->azimuth_deg,
             (double)toa->closure_error_samples,
+            toa_confidence_text(toa->confidence),
+            (unsigned)toa->track_eligible,
             (unsigned long)cycles_to_microseconds(detection_cycles),
             (unsigned long)cycles_to_microseconds(toa_cycles),
             (unsigned long)cycles_to_microseconds(
@@ -659,6 +858,7 @@ static void emit_operational_target(
             sizeof(message),
             "[TARGET] seq=%lu detected=1 alert=%u toa=INVALID "
             "loc_valid=0 dir=UNKNOWN az=NA cl=%.2f flags=0x%02X "
+            "conf=NONE track=0 "
             "det_us=%lu toa_us=%lu proc_us=%lu\r\n",
             (unsigned long)order,
             (unsigned)detection->alert_level,
@@ -834,18 +1034,14 @@ static bool process_ready_slot(uint8_t slot)
     }
 
     const uint32_t detection_cycles = DWT->CYCCNT - start_cycles;
+    uint32_t toa_cycles = 0U;
 
     if ((descriptor.flags & AUDIO_SLOT_FLAG_RECORD) != 0U)
     {
-        if ((descriptor.record_order == 0U) ||
-            (descriptor.record_order > RECORD_MAX_OUTPUT_CHUNKS))
+        if (descriptor.record_order == 0U)
         {
             return false;
         }
-
-        const uint32_t result_index = descriptor.record_order - 1U;
-        s_record_results[result_index] = result;
-        s_record_result_valid[result_index] = true;
 
         emit_live_detection(
             descriptor.record_order,
@@ -855,6 +1051,8 @@ static bool process_ready_slot(uint8_t slot)
 
         if (result.alert_level == 0U)
         {
+            s_no_target_count++;
+
             emit_operational_target(
                 descriptor.record_order,
                 &result,
@@ -873,14 +1071,33 @@ static bool process_ready_slot(uint8_t slot)
                 return false;
             }
 
-            const uint32_t toa_cycles =
-                DWT->CYCCNT - toa_start_cycles;
+            toa_cycles = DWT->CYCCNT - toa_start_cycles;
+
+            if (toa_cycles > s_toa_cycles_max)
+            {
+                s_toa_cycles_max = toa_cycles;
+            }
 
             emit_live_toa(
                 descriptor.record_order,
                 &toa_result,
                 detection_cycles,
                 toa_cycles
+            );
+
+            emit_toa_peak_diagnostics(
+                descriptor.record_order,
+                &toa_result
+            );
+
+            emit_toa_solver_diagnostics(
+                descriptor.record_order,
+                &toa_result
+            );
+
+            emit_toa_confidence(
+                descriptor.record_order,
+                &toa_result
             );
 
             emit_operational_target(
@@ -890,6 +1107,39 @@ static bool process_ready_slot(uint8_t slot)
                 detection_cycles,
                 toa_cycles
             );
+
+            if (toa_result.valid != 0U)
+            {
+                s_target_valid_count++;
+
+                if (toa_result.confidence == TOA_CONFIDENCE_HIGH)
+                {
+                    s_conf_high_count++;
+                }
+                else if (toa_result.confidence == TOA_CONFIDENCE_MEDIUM)
+                {
+                    s_conf_medium_count++;
+                }
+                else if (toa_result.confidence == TOA_CONFIDENCE_LOW)
+                {
+                    s_conf_low_count++;
+                }
+
+                if (toa_result.track_eligible != 0U)
+                {
+                    s_track_eligible_count++;
+                }
+            }
+            else
+            {
+                s_target_invalid_count++;
+            }
+        }
+
+        const uint32_t processing_cycles = detection_cycles + toa_cycles;
+        if (processing_cycles > s_processing_cycles_max)
+        {
+            s_processing_cycles_max = processing_cycles;
         }
     }
 
@@ -979,15 +1229,29 @@ int main(void)
 
     audio_recorder_init();
 
+    if (!audio_recorder_is_free_running() ||
+        (audio_recorder_runtime_api_revision() != AUDIO_RECORDER_LIVE_API_REV))
+    {
+        stop_with_error("[AUDIO_RECORDER_MODE_FAIL]\r\n");
+    }
+
+    {
+        char message[160];
+        snprintf(
+            message,
+            sizeof(message),
+            "[RECORDER_MODE] free_running=1 retain_audio=0 stop_boundary=1 api=0x%08lX\r\n",
+            (unsigned long)AUDIO_RECORDER_LIVE_API_REV
+        );
+        uart_send(message);
+    }
+
     /* El modelo debe estar listo antes de completar el primer chunk. */
     if (!drone_detection_init())
     {
         stop_with_error("[DETECTION_INIT_FAIL]\r\n");
     }
 
-
-    memset(s_record_results, 0, sizeof(s_record_results));
-    memset(s_record_result_valid, 0, sizeof(s_record_result_valid));
 
     if (!wait_for_record_command())
     {
@@ -996,8 +1260,11 @@ int main(void)
 
 
     uart_send(
-        "[CAPTURE_STARTED] calibration=3 max_record=16 "
-        "stop_at_second_boundary=1 detection=concurrent toa_gate=alert_gt_0\r\n"
+        "[CAPTURE_STARTED] calibration=3 max_record=unlimited "
+        "stop_at_second_boundary=1 detection=concurrent "
+        "toa_gate=alert_gt_0 live=1 visual_telemetry=1 peak_diag=3 "
+        "peak_solver=global_corr_closure ratio_min=0.95 "
+        "confidence=peak_ambiguity_v1 track_gate=low_reject\r\n"
     );
 
     if (!start_audio_capture())
@@ -1102,61 +1369,48 @@ int main(void)
 
     emit_detection_profile();
 
-    if (recorded_chunks == 0U)
+
     {
-        stop_with_error("[NO_COMPLETE_RECORD_CHUNKS]\r\n");
-    }
-
-    for (uint32_t chunk = 0U; chunk < recorded_chunks; chunk++)
-    {
-        if (!s_record_result_valid[chunk])
-        {
-            stop_with_error("[MISSING_DETECTION_RESULT]\r\n");
-        }
-    }
-
-#if TOA1D2_TEST_MODE
-    uart_send("[TOA1D2_END] transfer=disabled json=disabled\r\n");
-
-    LED_OFF(LED_RED_Pin);
-    LED_OFF(LED_BLUE_Pin);
-    LED_ON(LED_GREEN_Pin);
-
-    while (1)
-    {
-        HAL_Delay(1000U);
-    }
-#endif
-
-    if (!audio_recorder_begin_transfer(recorded_chunks))
-    {
-        stop_with_error("[TRANSFER_START_FAIL]\r\n");
-    }
-
-    for (uint32_t chunk = 0U; chunk < recorded_chunks; chunk++)
-    {
-        char detection_line[512];
-        const uint32_t order = chunk + 1U;
-
-        format_detection_line(
-            detection_line,
-            sizeof(detection_line),
-            order,
-            &s_record_results[chunk]
+        char message[256];
+        snprintf(
+            message,
+            sizeof(message),
+            "[LIVE_SUMMARY] records=%lu no_target=%lu target_valid=%lu "
+            "target_invalid=%lu toa_us_max=%lu proc_us_max=%lu\r\n",
+            (unsigned long)recorded_chunks,
+            (unsigned long)s_no_target_count,
+            (unsigned long)s_target_valid_count,
+            (unsigned long)s_target_invalid_count,
+            (unsigned long)cycles_to_microseconds(s_toa_cycles_max),
+            (unsigned long)cycles_to_microseconds(s_processing_cycles_max)
         );
-
-        if (!audio_recorder_emit_record_chunk(
-                chunk,
-                order,
-                detection_line))
-        {
-            stop_with_error("[TRANSFER_CHUNK_FAIL]\r\n");
-        }
+        uart_send(message);
     }
 
-    if (!audio_recorder_end_transfer(recorded_chunks))
     {
-        stop_with_error("[TRANSFER_END_FAIL]\r\n");
+        char message[256];
+        snprintf(
+            message,
+            sizeof(message),
+            "[CONF_SUMMARY] high=%lu medium=%lu low=%lu track_eligible=%lu "
+            "amb_gap_max=0.020 high_cl_max=0.80\r\n",
+            (unsigned long)s_conf_high_count,
+            (unsigned long)s_conf_medium_count,
+            (unsigned long)s_conf_low_count,
+            (unsigned long)s_track_eligible_count
+        );
+        uart_send(message);
+    }
+
+    {
+        char message[192];
+        snprintf(
+            message,
+            sizeof(message),
+            "[TOA1E3_END] reason=%s live=stopped transfer=disabled json=disabled\r\n",
+            audio_recorder_close_reason_text(recorder_stats.close_reason)
+        );
+        uart_send(message);
     }
 
     LED_OFF(LED_RED_Pin);

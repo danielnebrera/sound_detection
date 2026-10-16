@@ -18,6 +18,12 @@
 #define TOA_MAX_LAG_VERTICAL    18
 #define TOA_MAX_LAG_DIAGONAL    22
 #define TOA_CLOSURE_MAX_SAMPLES  1.50f
+#define TOA_PEAK_MIN_SEPARATION   2
+#define TOA_CORR_VALUE_COUNT_MAX  (2 * TOA_MAX_LAG_DIAGONAL + 1)
+#define TOA_SOLVER_MIN_SCORE_RATIO 0.95f
+#define TOA_SOLVER_SCORE_EPSILON   1.0e-6f
+#define TOA_CONF_AMBIGUOUS_GAP_MAX  0.020f
+#define TOA_CONF_HIGH_CLOSURE_MAX   0.80f
 
 static float correlation_at_lag(
     const int16_t *a,
@@ -79,6 +85,109 @@ static float correlation_at_lag(
     return (float)(numerator / sqrt(energy_a * energy_b));
 }
 
+static float refine_peak_delta(
+    const float *corr_values,
+    int32_t max_lag,
+    int32_t lag)
+{
+    if ((corr_values == NULL) ||
+        (lag <= -max_lag) ||
+        (lag >= max_lag))
+    {
+        return 0.0f;
+    }
+
+    const uint32_t index = (uint32_t)(lag + max_lag);
+    const float corr_m1 = corr_values[index - 1U];
+    const float corr_0 = corr_values[index];
+    const float corr_p1 = corr_values[index + 1U];
+    const float denominator = corr_m1 - 2.0f * corr_0 + corr_p1;
+
+    if (fabsf(denominator) <= 1.0e-12f)
+    {
+        return 0.0f;
+    }
+
+    float delta = 0.5f * (corr_m1 - corr_p1) / denominator;
+
+    if (delta > 1.0f)
+    {
+        delta = 1.0f;
+    }
+    else if (delta < -1.0f)
+    {
+        delta = -1.0f;
+    }
+
+    return delta;
+}
+
+static bool lag_is_local_peak(
+    const float *corr_values,
+    int32_t max_lag,
+    int32_t lag)
+{
+    const uint32_t index = (uint32_t)(lag + max_lag);
+    const uint32_t last = (uint32_t)(2 * max_lag);
+    const float value = corr_values[index];
+
+    if ((index > 0U) && (value < corr_values[index - 1U]))
+    {
+        return false;
+    }
+
+    if ((index < last) && (value < corr_values[index + 1U]))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+static bool lag_is_separated(
+    int32_t lag,
+    const ToaPeakCandidate candidate[TOA_PEAK_CANDIDATE_COUNT],
+    uint32_t selected_count)
+{
+    for (uint32_t i = 0U; i < selected_count; i++)
+    {
+        if (candidate[i].valid == 0U)
+        {
+            continue;
+        }
+
+        int32_t distance = lag - (int32_t)candidate[i].integer_lag;
+        if (distance < 0)
+        {
+            distance = -distance;
+        }
+
+        if (distance < TOA_PEAK_MIN_SEPARATION)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static void fill_peak_candidate(
+    const float *corr_values,
+    int32_t max_lag,
+    int32_t lag,
+    ToaPeakCandidate *candidate)
+{
+    const uint32_t index = (uint32_t)(lag + max_lag);
+    const float delta = refine_peak_delta(corr_values, max_lag, lag);
+
+    candidate->integer_lag = (int16_t)lag;
+    candidate->lag_samples = (float)lag + delta;
+    candidate->correlation = corr_values[index];
+    candidate->peak_at_search_boundary =
+        ((lag == -max_lag) || (lag == max_lag)) ? 1U : 0U;
+    candidate->valid = 1U;
+}
+
 static bool estimate_pair(
     const int16_t *a,
     const int16_t *b,
@@ -87,17 +196,24 @@ static bool estimate_pair(
     ToaPairResult *out)
 {
     if ((a == NULL) || (b == NULL) || (out == NULL) ||
-        (count <= (uint32_t)(2 * max_lag + 1)))
+        (count <= (uint32_t)(2 * max_lag + 1)) ||
+        ((2 * max_lag + 1) > TOA_CORR_VALUE_COUNT_MAX))
     {
         return false;
     }
 
+    float corr_values[TOA_CORR_VALUE_COUNT_MAX];
     int32_t best_lag = 0;
     float best_corr = -2.0f;
+
+    memset(corr_values, 0, sizeof(corr_values));
+    memset(out, 0, sizeof(*out));
 
     for (int32_t lag = -max_lag; lag <= max_lag; lag++)
     {
         const float corr = correlation_at_lag(a, b, count, lag);
+        const uint32_t index = (uint32_t)(lag + max_lag);
+        corr_values[index] = corr;
 
         if (corr > best_corr)
         {
@@ -106,40 +222,60 @@ static bool estimate_pair(
         }
     }
 
-    float delta = 0.0f;
+    fill_peak_candidate(
+        corr_values,
+        max_lag,
+        best_lag,
+        &out->candidate[0]
+    );
 
-    if ((best_lag > -max_lag) && (best_lag < max_lag))
+    uint32_t selected_count = 1U;
+
+    for (uint32_t candidate_index = 1U;
+         candidate_index < TOA_PEAK_CANDIDATE_COUNT;
+         candidate_index++)
     {
-        const float corr_m1 =
-            correlation_at_lag(a, b, count, best_lag - 1);
-        const float corr_0 = best_corr;
-        const float corr_p1 =
-            correlation_at_lag(a, b, count, best_lag + 1);
+        bool found = false;
+        int32_t selected_lag = 0;
+        float selected_corr = -2.0f;
 
-        const float denominator =
-            corr_m1 - 2.0f * corr_0 + corr_p1;
-
-        if (fabsf(denominator) > 1.0e-12f)
+        for (int32_t lag = -max_lag; lag <= max_lag; lag++)
         {
-            delta =
-                0.5f * (corr_m1 - corr_p1) / denominator;
-
-            if (delta > 1.0f)
+            if (!lag_is_local_peak(corr_values, max_lag, lag) ||
+                !lag_is_separated(lag, out->candidate, selected_count))
             {
-                delta = 1.0f;
+                continue;
             }
-            else if (delta < -1.0f)
+
+            const float corr = corr_values[(uint32_t)(lag + max_lag)];
+
+            if ((!found) || (corr > selected_corr))
             {
-                delta = -1.0f;
+                found = true;
+                selected_corr = corr;
+                selected_lag = lag;
             }
         }
+
+        if (!found)
+        {
+            break;
+        }
+
+        fill_peak_candidate(
+            corr_values,
+            max_lag,
+            selected_lag,
+            &out->candidate[candidate_index]
+        );
+        selected_count++;
     }
 
-    out->integer_lag = (int16_t)best_lag;
-    out->lag_samples = (float)best_lag + delta;
-    out->correlation = best_corr;
+    out->integer_lag = out->candidate[0].integer_lag;
+    out->lag_samples = out->candidate[0].lag_samples;
+    out->correlation = out->candidate[0].correlation;
     out->peak_at_search_boundary =
-        ((best_lag == -max_lag) || (best_lag == max_lag)) ? 1U : 0U;
+        out->candidate[0].peak_at_search_boundary;
 
     return true;
 }
@@ -176,6 +312,415 @@ static ToaDirection direction_from_azimuth(float azimuth_deg)
     }
 
     return TOA_DIRECTION_UP_LEFT;
+}
+
+static void compute_closure_values(
+    float lt,
+    float lb,
+    float lr,
+    float tb,
+    float tr,
+    float br,
+    float *e1,
+    float *e2,
+    float *e3,
+    float *e4,
+    float *closure)
+{
+    const float local_e1 = fabsf(lb - lt - tb);
+    const float local_e2 = fabsf(lr - lt - tr);
+    const float local_e3 = fabsf(lr - lb - br);
+    const float local_e4 = fabsf(tr - tb - br);
+
+    float local_closure = local_e1;
+
+    if (local_e2 > local_closure)
+    {
+        local_closure = local_e2;
+    }
+    if (local_e3 > local_closure)
+    {
+        local_closure = local_e3;
+    }
+    if (local_e4 > local_closure)
+    {
+        local_closure = local_e4;
+    }
+
+    if (e1 != NULL)
+    {
+        *e1 = local_e1;
+    }
+    if (e2 != NULL)
+    {
+        *e2 = local_e2;
+    }
+    if (e3 != NULL)
+    {
+        *e3 = local_e3;
+    }
+    if (e4 != NULL)
+    {
+        *e4 = local_e4;
+    }
+    if (closure != NULL)
+    {
+        *closure = local_closure;
+    }
+}
+
+static uint8_t selected_boundary_flag(const ToaResult *out)
+{
+    if (out == NULL)
+    {
+        return 1U;
+    }
+
+    for (uint32_t pair = 0U; pair < TOA_PAIR_COUNT; pair++)
+    {
+        if (out->pair[pair].peak_at_search_boundary != 0U)
+        {
+            return 1U;
+        }
+    }
+
+    return 0U;
+}
+
+static void compute_selected_geometry(ToaResult *out)
+{
+    out->h_samples =
+        0.5f *
+        (
+            out->pair[TOA_PAIR_LEFT_RIGHT].lag_samples +
+            out->pair[TOA_PAIR_TOP_BACK].lag_samples
+        );
+
+    out->v_samples =
+        0.5f *
+        (
+            out->pair[TOA_PAIR_LEFT_TOP].lag_samples -
+            out->pair[TOA_PAIR_BACK_RIGHT].lag_samples
+        );
+
+    const float x = -out->h_samples / 0.09f;
+    const float y = out->v_samples / 0.12f;
+
+    float azimuth = atan2f(x, y) * TOA_RAD_TO_DEG_F;
+
+    if (azimuth < 0.0f)
+    {
+        azimuth += 360.0f;
+    }
+    else if (azimuth >= 360.0f)
+    {
+        azimuth -= 360.0f;
+    }
+
+    out->azimuth_deg = azimuth;
+    out->direction = direction_from_azimuth(azimuth);
+
+    const float lt = out->pair[TOA_PAIR_LEFT_TOP].lag_samples;
+    const float lb = out->pair[TOA_PAIR_LEFT_BACK].lag_samples;
+    const float lr = out->pair[TOA_PAIR_LEFT_RIGHT].lag_samples;
+    const float tb = out->pair[TOA_PAIR_TOP_BACK].lag_samples;
+    const float tr = out->pair[TOA_PAIR_TOP_RIGHT].lag_samples;
+    const float br = out->pair[TOA_PAIR_BACK_RIGHT].lag_samples;
+
+    compute_closure_values(
+        lt,
+        lb,
+        lr,
+        tb,
+        tr,
+        br,
+        &out->closure_e1_samples,
+        &out->closure_e2_samples,
+        &out->closure_e3_samples,
+        &out->closure_e4_samples,
+        &out->closure_error_samples
+    );
+
+    out->closure_valid =
+        (out->closure_error_samples <= TOA_CLOSURE_MAX_SAMPLES) ? 1U : 0U;
+    out->invalid_flags = TOA_INVALID_NONE;
+
+    if (selected_boundary_flag(out) != 0U)
+    {
+        out->invalid_flags |= TOA_INVALID_SEARCH_BOUNDARY;
+    }
+
+    if (out->closure_valid == 0U)
+    {
+        out->invalid_flags |= TOA_INVALID_CLOSURE;
+    }
+
+    out->valid = (out->invalid_flags == TOA_INVALID_NONE) ? 1U : 0U;
+
+    if (out->valid == 0U)
+    {
+        out->direction = TOA_DIRECTION_UNKNOWN;
+    }
+}
+
+static float p1_score(const ToaResult *out)
+{
+    float score = 0.0f;
+
+    for (uint32_t pair = 0U; pair < TOA_PAIR_COUNT; pair++)
+    {
+        score += out->pair[pair].candidate[0].correlation;
+    }
+
+    return score;
+}
+
+static void apply_candidate_selection(
+    ToaResult *out,
+    const uint8_t selected[TOA_PAIR_COUNT])
+{
+    for (uint32_t pair = 0U; pair < TOA_PAIR_COUNT; pair++)
+    {
+        const uint8_t candidate_index = selected[pair];
+        const ToaPeakCandidate *candidate =
+            &out->pair[pair].candidate[candidate_index];
+
+        out->pair[pair].integer_lag = candidate->integer_lag;
+        out->pair[pair].lag_samples = candidate->lag_samples;
+        out->pair[pair].correlation = candidate->correlation;
+        out->pair[pair].peak_at_search_boundary =
+            candidate->peak_at_search_boundary;
+        out->selected_candidate[pair] = (uint8_t)(candidate_index + 1U);
+    }
+}
+
+static bool solve_global_candidates(ToaResult *out)
+{
+    if ((out == NULL) || (out->solver_raw_score <= 0.0f))
+    {
+        return false;
+    }
+
+    bool found = false;
+    float best_score = -1000.0f;
+    float best_closure = 1000.0f;
+    uint8_t best_selection[TOA_PAIR_COUNT] = {0};
+
+    const uint32_t combination_count =
+        TOA_PEAK_CANDIDATE_COUNT *
+        TOA_PEAK_CANDIDATE_COUNT *
+        TOA_PEAK_CANDIDATE_COUNT *
+        TOA_PEAK_CANDIDATE_COUNT *
+        TOA_PEAK_CANDIDATE_COUNT *
+        TOA_PEAK_CANDIDATE_COUNT;
+
+    for (uint32_t code = 0U; code < combination_count; code++)
+    {
+        uint32_t value = code;
+        uint8_t selected[TOA_PAIR_COUNT] = {0};
+        float lag[TOA_PAIR_COUNT] = {0.0f};
+        float score = 0.0f;
+        bool usable = true;
+
+        for (uint32_t pair = 0U; pair < TOA_PAIR_COUNT; pair++)
+        {
+            const uint8_t candidate_index =
+                (uint8_t)(value % TOA_PEAK_CANDIDATE_COUNT);
+            value /= TOA_PEAK_CANDIDATE_COUNT;
+
+            const ToaPeakCandidate *candidate =
+                &out->pair[pair].candidate[candidate_index];
+
+            if ((candidate->valid == 0U) ||
+                (candidate->peak_at_search_boundary != 0U))
+            {
+                usable = false;
+                break;
+            }
+
+            selected[pair] = candidate_index;
+            lag[pair] = candidate->lag_samples;
+            score += candidate->correlation;
+        }
+
+        if (!usable)
+        {
+            continue;
+        }
+
+        out->solver_combinations_tested++;
+
+        float closure = 0.0f;
+        compute_closure_values(
+            lag[TOA_PAIR_LEFT_TOP],
+            lag[TOA_PAIR_LEFT_BACK],
+            lag[TOA_PAIR_LEFT_RIGHT],
+            lag[TOA_PAIR_TOP_BACK],
+            lag[TOA_PAIR_TOP_RIGHT],
+            lag[TOA_PAIR_BACK_RIGHT],
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            &closure
+        );
+
+        if (closure > TOA_CLOSURE_MAX_SAMPLES)
+        {
+            continue;
+        }
+
+        const float score_ratio = score / out->solver_raw_score;
+
+        if (score_ratio < TOA_SOLVER_MIN_SCORE_RATIO)
+        {
+            continue;
+        }
+
+        out->solver_valid_combinations++;
+
+        if ((!found) ||
+            (score > (best_score + TOA_SOLVER_SCORE_EPSILON)) ||
+            ((fabsf(score - best_score) <= TOA_SOLVER_SCORE_EPSILON) &&
+             (closure < best_closure)))
+        {
+            found = true;
+            best_score = score;
+            best_closure = closure;
+            memcpy(best_selection, selected, sizeof(best_selection));
+        }
+    }
+
+    if (!found)
+    {
+        return false;
+    }
+
+    apply_candidate_selection(out, best_selection);
+    out->solver_selected_score = best_score;
+    out->solver_score_ratio = best_score / out->solver_raw_score;
+
+    for (uint32_t pair = 0U; pair < TOA_PAIR_COUNT; pair++)
+    {
+        if (best_selection[pair] != 0U)
+        {
+            out->solver_used = 1U;
+            break;
+        }
+    }
+
+    return true;
+}
+
+
+static void compute_measurement_confidence(ToaResult *out)
+{
+    if (out == NULL)
+    {
+        return;
+    }
+
+    out->confidence = TOA_CONFIDENCE_NONE;
+    out->track_eligible = 0U;
+    out->confidence_ambiguous_pairs = 0U;
+    out->confidence_gap_pair_count = 0U;
+    out->confidence_peak_gap_min = 0.0f;
+    out->confidence_selected_corr_min = 0.0f;
+    out->confidence_selected_corr_mean = 0.0f;
+
+    if (out->valid == 0U)
+    {
+        return;
+    }
+
+    float selected_corr_sum = 0.0f;
+    float selected_corr_min = 2.0f;
+    float gap_min = 2.0f;
+
+    for (uint32_t pair = 0U; pair < TOA_PAIR_COUNT; pair++)
+    {
+        const float selected_corr = out->pair[pair].correlation;
+        selected_corr_sum += selected_corr;
+
+        if (selected_corr < selected_corr_min)
+        {
+            selected_corr_min = selected_corr;
+        }
+
+        float best = -2.0f;
+        float second = -2.0f;
+
+        for (uint32_t candidate_index = 0U;
+             candidate_index < TOA_PEAK_CANDIDATE_COUNT;
+             candidate_index++)
+        {
+            const ToaPeakCandidate *candidate =
+                &out->pair[pair].candidate[candidate_index];
+
+            if ((candidate->valid == 0U) ||
+                (candidate->peak_at_search_boundary != 0U))
+            {
+                continue;
+            }
+
+            const float corr = candidate->correlation;
+
+            if (corr > best)
+            {
+                second = best;
+                best = corr;
+            }
+            else if (corr > second)
+            {
+                second = corr;
+            }
+        }
+
+        if (second > -1.5f)
+        {
+            const float gap = best - second;
+            out->confidence_gap_pair_count++;
+
+            if (gap < gap_min)
+            {
+                gap_min = gap;
+            }
+
+            if (gap <= TOA_CONF_AMBIGUOUS_GAP_MAX)
+            {
+                out->confidence_ambiguous_pairs++;
+            }
+        }
+    }
+
+    out->confidence_selected_corr_min = selected_corr_min;
+    out->confidence_selected_corr_mean =
+        selected_corr_sum / (float)TOA_PAIR_COUNT;
+
+    if (out->confidence_gap_pair_count != 0U)
+    {
+        out->confidence_peak_gap_min = gap_min;
+    }
+
+    if (out->confidence_ambiguous_pairs >= 2U)
+    {
+        out->confidence = TOA_CONFIDENCE_LOW;
+        out->track_eligible = 0U;
+        return;
+    }
+
+    if ((out->raw_valid != 0U) &&
+        (out->solver_used == 0U) &&
+        (out->confidence_ambiguous_pairs == 0U) &&
+        (out->closure_error_samples <= TOA_CONF_HIGH_CLOSURE_MAX))
+    {
+        out->confidence = TOA_CONFIDENCE_HIGH;
+        out->track_eligible = 1U;
+        return;
+    }
+
+    out->confidence = TOA_CONFIDENCE_MEDIUM;
+    out->track_eligible = 1U;
 }
 
 bool toa_localizer_process(
@@ -243,89 +788,33 @@ bool toa_localizer_process(
         return false;
     }
 
-    out->h_samples =
-        0.5f *
-        (
-            out->pair[TOA_PAIR_LEFT_RIGHT].lag_samples +
-            out->pair[TOA_PAIR_TOP_BACK].lag_samples
-        );
-
-    out->v_samples =
-        0.5f *
-        (
-            out->pair[TOA_PAIR_LEFT_TOP].lag_samples -
-            out->pair[TOA_PAIR_BACK_RIGHT].lag_samples
-        );
-
-    const float x = -out->h_samples / 0.09f;
-    const float y = out->v_samples / 0.12f;
-
-    float azimuth = atan2f(x, y) * TOA_RAD_TO_DEG_F;
-
-    if (azimuth < 0.0f)
-    {
-        azimuth += 360.0f;
-    }
-    else if (azimuth >= 360.0f)
-    {
-        azimuth -= 360.0f;
-    }
-
-    out->azimuth_deg = azimuth;
-    out->direction = direction_from_azimuth(azimuth);
-
-    const float lt = out->pair[TOA_PAIR_LEFT_TOP].lag_samples;
-    const float lb = out->pair[TOA_PAIR_LEFT_BACK].lag_samples;
-    const float lr = out->pair[TOA_PAIR_LEFT_RIGHT].lag_samples;
-    const float tb = out->pair[TOA_PAIR_TOP_BACK].lag_samples;
-    const float tr = out->pair[TOA_PAIR_TOP_RIGHT].lag_samples;
-    const float br = out->pair[TOA_PAIR_BACK_RIGHT].lag_samples;
-
-    out->closure_e1_samples = fabsf(lb - lt - tb);
-    out->closure_e2_samples = fabsf(lr - lt - tr);
-    out->closure_e3_samples = fabsf(lr - lb - br);
-    out->closure_e4_samples = fabsf(tr - tb - br);
-
-    float closure_error = out->closure_e1_samples;
-
-    if (out->closure_e2_samples > closure_error)
-    {
-        closure_error = out->closure_e2_samples;
-    }
-    if (out->closure_e3_samples > closure_error)
-    {
-        closure_error = out->closure_e3_samples;
-    }
-    if (out->closure_e4_samples > closure_error)
-    {
-        closure_error = out->closure_e4_samples;
-    }
-
-    out->closure_error_samples = closure_error;
-    out->closure_valid =
-        (closure_error <= TOA_CLOSURE_MAX_SAMPLES) ? 1U : 0U;
-    out->invalid_flags = TOA_INVALID_NONE;
-
     for (uint32_t pair = 0U; pair < TOA_PAIR_COUNT; pair++)
     {
-        if (out->pair[pair].peak_at_search_boundary != 0U)
+        out->selected_candidate[pair] = 1U;
+    }
+
+    out->solver_raw_score = p1_score(out);
+    out->solver_selected_score = out->solver_raw_score;
+    out->solver_score_ratio = 1.0f;
+
+    compute_selected_geometry(out);
+
+    out->raw_closure_error_samples = out->closure_error_samples;
+    out->raw_invalid_flags = out->invalid_flags;
+    out->raw_valid = out->valid;
+
+    if (out->raw_valid == 0U)
+    {
+        if (solve_global_candidates(out))
         {
-            out->invalid_flags |= TOA_INVALID_SEARCH_BOUNDARY;
-            break;
+            compute_selected_geometry(out);
         }
     }
 
-    if (out->closure_valid == 0U)
-    {
-        out->invalid_flags |= TOA_INVALID_CLOSURE;
-    }
+    out->solver_recovered =
+        ((out->raw_valid == 0U) && (out->valid != 0U)) ? 1U : 0U;
 
-    out->valid = (out->invalid_flags == TOA_INVALID_NONE) ? 1U : 0U;
-
-    if (out->valid == 0U)
-    {
-        out->direction = TOA_DIRECTION_UNKNOWN;
-    }
+    compute_measurement_confidence(out);
 
     return true;
 }
@@ -352,5 +841,21 @@ const char *toa_direction_text(ToaDirection direction)
             return "UP_LEFT";
         default:
             return "UNKNOWN";
+    }
+}
+
+
+const char *toa_confidence_text(ToaMeasurementConfidence confidence)
+{
+    switch (confidence)
+    {
+        case TOA_CONFIDENCE_LOW:
+            return "LOW";
+        case TOA_CONFIDENCE_MEDIUM:
+            return "MEDIUM";
+        case TOA_CONFIDENCE_HIGH:
+            return "HIGH";
+        default:
+            return "NONE";
     }
 }

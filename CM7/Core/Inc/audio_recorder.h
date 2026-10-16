@@ -1,12 +1,12 @@
 /**
  * @file audio_recorder.h
- * @brief Productor-consumidor de audio con ring PCM16 en SDRAM.
+ * @brief Productor-consumidor LIVE de audio con ring PCM16 en SDRAM.
  *
  * - El productor se ejecuta desde las callbacks SAI/DMA.
  * - Cada slot contiene exactamente un segundo por cuatro canales.
- * - El consumidor procesa los slots READY desde main().
- * - Los tres primeros slots logicos calibran el detector y se liberan.
- * - Hasta 16 chunks utiles se conservan para transferir al detener.
+ * - Los tres primeros slots logicos calibran el detector.
+ * - En modo LIVE, cada slot se libera al terminar su procesamiento.
+ * - No existe limite de 16 ordenes; la captura termina solo por STOP o error.
  */
 
 #ifndef AUDIO_RECORDER_H
@@ -23,8 +23,11 @@
 
 #define RECORD_CALIBRATION_CHUNKS      3U
 #define AUDIO_RING_SLOT_COUNT          16U
-#define RECORD_MAX_OUTPUT_CHUNKS       AUDIO_RING_SLOT_COUNT
+#define RECORD_MAX_OUTPUT_CHUNKS       AUDIO_RING_SLOT_COUNT /* legado: no limita LIVE */
 #define AUDIO_SLOT_INVALID             0xFFU
+
+#define AUDIO_RECORDER_LIVE_MODE       1U
+#define AUDIO_RECORDER_LIVE_API_REV    0x0001E102UL
 
 typedef struct
 {
@@ -92,14 +95,15 @@ typedef struct
 void audio_recorder_init(void);
 bool audio_recorder_start_session(void);
 
-/* Productor: solo se llama desde callbacks SAI/DMA. */
+bool audio_recorder_is_free_running(void);
+uint32_t audio_recorder_runtime_api_revision(void);
+
 bool audio_recorder_on_dma_pair_from_isr(
     uint8_t half,
     const uint32_t *dma_a,
     const uint32_t *dma_b
 );
 
-/* Comando S por interrupcion UART durante captura. */
 bool audio_recorder_arm_stop_receiver(void);
 void audio_recorder_disarm_stop_receiver(void);
 void audio_recorder_request_stop(void);
@@ -109,7 +113,6 @@ bool audio_recorder_capture_closed(void);
 AudioRecorderCloseReason audio_recorder_close_reason(void);
 const char *audio_recorder_close_reason_text(AudioRecorderCloseReason reason);
 
-/* Cola SPSC productor ISR -> consumidor main. */
 bool audio_recorder_pop_ready_slot(uint8_t *slot_index);
 uint32_t audio_recorder_ready_count(void);
 
@@ -131,6 +134,7 @@ bool audio_recorder_complete_processing(
 uint32_t audio_recorder_recorded_chunks(void);
 uint64_t audio_recorder_total_frames(void);
 
+/* No hay historial de audio retenido en modo LIVE. */
 bool audio_recorder_get_record_chunk_view(
     uint32_t record_chunk,
     RecorderChunkView *view
@@ -143,7 +147,7 @@ bool audio_recorder_get_record_descriptor(
 
 void audio_recorder_get_stats(AudioRecorderStats *stats);
 
-/* Protocolo UART posterior a la captura. */
+/* API heredada de transferencia: no utilizada en TOA-1E LIVE. */
 void audio_recorder_send_text(const char *text);
 bool audio_recorder_begin_transfer(uint32_t chunk_count);
 bool audio_recorder_emit_record_chunk(
