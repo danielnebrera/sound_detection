@@ -40,6 +40,7 @@
 #include "model_runner_stm32.h"
 #include "portenta_sdram.h"
 #include "toa_localizer.h"
+#include "track3d.h"
 #include "stm32h7xx.h"
 
 #include <stdbool.h>
@@ -1013,6 +1014,39 @@ static void stop_with_error(const char *message)
     }
 }
 
+/* TRACK3D-R1: telemetria paralela, formato aditivo; nunca afecta F1.1. */
+static void emit_track3d(uint32_t seq, const Track3dOutput *t)
+{
+    char message[224];
+    if (t == NULL) return;
+    if (t->valid != 0U) {
+        if (t->innovation_valid != 0U) {
+            snprintf(message, sizeof(message),
+                "[TRACK3D] seq=%lu state=%s valid=1 used=%u rejected=%u "
+                "az=%.2f elev=%.2f az_phys=%.2f innovation=%.2f\r\n",
+                (unsigned long)seq, track3d_state_text(t->state),
+                (unsigned)t->used, (unsigned)t->rejected,
+                (double)t->azimuth_native_deg, (double)t->elevation_deg,
+                (double)t->azimuth_physical_deg, (double)t->innovation_deg);
+        } else {
+            snprintf(message, sizeof(message),
+                "[TRACK3D] seq=%lu state=%s valid=1 used=%u rejected=%u "
+                "az=%.2f elev=%.2f az_phys=%.2f innovation=NA\r\n",
+                (unsigned long)seq, track3d_state_text(t->state),
+                (unsigned)t->used, (unsigned)t->rejected,
+                (double)t->azimuth_native_deg, (double)t->elevation_deg,
+                (double)t->azimuth_physical_deg);
+        }
+    } else {
+        snprintf(message, sizeof(message),
+            "[TRACK3D] seq=%lu state=%s valid=0 used=%u rejected=%u "
+            "az=NA elev=NA az_phys=NA innovation=NA\r\n",
+            (unsigned long)seq, track3d_state_text(t->state),
+            (unsigned)t->used, (unsigned)t->rejected);
+    }
+    uart_send(message);
+}
+
 static bool process_ready_slot(uint8_t slot)
 {
     AudioChunkDescriptor descriptor = {0};
@@ -1060,6 +1094,11 @@ static bool process_ready_slot(uint8_t slot)
                 detection_cycles,
                 0U
             );
+            {
+                const Track3dOutput t = track3d_step(
+                    descriptor.record_order, 0U, 0U, 0U, 0.0f, 0.0f);
+                emit_track3d(descriptor.record_order, &t);
+            }
         }
         else
         {
@@ -1085,6 +1124,18 @@ static bool process_ready_slot(uint8_t slot)
                 toa_cycles
             );
 
+            {
+                char tetra_line[160];
+                snprintf(tetra_line, sizeof(tetra_line),
+                         "[TOA_TETRA] seq=%lu fit=%u elev=%.2f norm=%.4f rms=%.3f\r\n",
+                         (unsigned long)descriptor.record_order,
+                         (unsigned)toa_result.tetra_fit_ok,
+                         (double)toa_result.tetra_elevation_deg,
+                         (double)toa_result.tetra_norm,
+                         (double)toa_result.tetra_rms_samples);
+                uart_send(tetra_line);
+            }
+
             emit_toa_peak_diagnostics(
                 descriptor.record_order,
                 &toa_result
@@ -1107,6 +1158,16 @@ static bool process_ready_slot(uint8_t slot)
                 detection_cycles,
                 toa_cycles
             );
+            {
+                const Track3dOutput t = track3d_step(
+                    descriptor.record_order,
+                    toa_result.valid,
+                    toa_result.track_eligible,
+                    toa_result.tetra_fit_ok,
+                    toa_result.azimuth_deg,
+                    toa_result.tetra_elevation_deg);
+                emit_track3d(descriptor.record_order, &t);
+            }
 
             if (toa_result.valid != 0U)
             {
@@ -1252,6 +1313,8 @@ int main(void)
         stop_with_error("[DETECTION_INIT_FAIL]\r\n");
     }
 
+
+    track3d_reset();
 
     if (!wait_for_record_command())
     {

@@ -4,6 +4,106 @@ Proyecto principal de detección de sonido para **Arduino Portenta H7 / STM32H74
 
 Esta rama fue creada a partir del estado estable histórico del proyecto y renombrada para mantener una estructura más clara y coherente con el repositorio `sound_detection`.
 
+
+## Estado actual del proyecto — continuidad 2026-10-19
+
+> **Actualización posterior:** la campaña física F1.1 incluye ROT360 lenta, PLAY/STOP, dos medias y dos rápidas. Ver **sección 67** para resultados, incidencias y el siguiente paso oficial (replay offline A/B del tracker 2D). Las instrucciones de «próxima prueba» en la sección 64 son históricas y ya fueron ejecutadas.
+
+> **Esta sección es la referencia operativa actual.** Las secciones anteriores del README conservan el historial de la evolución del proyecto y algunas describen modos ya superados.
+
+Estado consolidado:
+
+```text
+Base STM32                 = v2.1.7 estable, commit 26ba5c6
+Core activo                = CM7
+Captura                    = 4 micrófonos ICS-43434, 44.1 kHz
+Modo actual                = LIVE free-running
+Límite histórico 16 chunks = eliminado
+Cierre                     = STOP al final del segundo actual
+TOA                        = ventana central de 100 ms
+Solver                     = multi-peak global P1/P2/P3 + closure
+Closure máximo             = 1.50 samples
+Confidence                 = HIGH / MEDIUM / LOW / NONE
+Track gate                 = HIGH/MEDIUM elegibles; LOW/INVALID no actualizan tracker
+Tracker actual             = TOA-1F.1, azimuthal 2D, ejecutado en PC
+Elevation / ZENITH         = experimental, todavía fuera del estado del tracker 2D
+Distancia/range            = no estimada
+```
+
+### Arquitectura de memoria/captura actual
+
+No debe describirse como DMA directo a SDRAM. El flujo validado es:
+
+```text
+SAI2A + SAI2B
+    -> DMA a buffers ping-pong en D2 SRAM
+    -> copia/producer desde CPU/ISR
+    -> ring buffer en SDRAM externa
+    -> detector
+    -> TOA/TDOA cuando alert > 0
+    -> confidence
+    -> telemetría UART
+    -> tracker PC (TOA-1F.1)
+```
+
+La SDRAM validada sigue siendo de 8 MiB en `0x60000000`.
+
+### Mapeo físico actual de canales
+
+El montaje usado en la campaña TOA actual es:
+
+```text
+CH0 -> MIC7 -> left
+CH1 -> MIC5 -> top
+CH2 -> MIC6 -> back
+CH3 -> MIC2 -> right
+```
+
+Coordenadas relativas al centro del array, en metros:
+
+```text
+left / MIC7  = (-0.045, +0.060)
+right / MIC2 = (+0.045, +0.060)
+top / MIC5   = (-0.045, -0.060)
+back / MIC6  = (+0.045, -0.060)
+```
+
+Dimensiones aproximadas del rectángulo:
+
+```text
+horizontal = 9 cm
+vertical   = 12 cm
+diagonal   = 15 cm
+```
+
+### Checkpoint que NO debe romperse
+
+El checkpoint STM32 actual es **TOA-1E3.2**, validado con:
+
+```text
+free-running
+multi-peak global
+closure
+measurement confidence
+track gate
+```
+
+El primer tracker **TOA-1F.1** se añadió únicamente en PC; el firmware STM32 E3.2 permanece congelado para poder comparar RAW vs TRACK sin cambiar dos variables a la vez.
+
+### Regla experimental vigente
+
+Mantener una variable por experimento. No modificar simultáneamente:
+
+```text
+firmware TOA
+confidence thresholds
+tracker gains/gates
+ventana TOA
+```
+
+Los cambios deben compararse siempre contra el checkpoint anterior usando CSV + UART log completos.
+
+
 ---
 
 ## 1. Objetivo
@@ -3913,3 +4013,1049 @@ errors = 0
 proc_us < 1,000,000
 ```
 
+
+
+---
+
+## 55. TOA-1D.2 — validación final detector + TOA
+
+La integración operacional detector -> TOA fue validada posteriormente a la redacción original de la sección 54.
+
+Semántica definitiva:
+
+```text
+alert == 0
+    -> TARGET detected=0
+    -> TOA=NOT_EVALUATED
+    -> loc_valid=0
+    -> dir=NONE
+    -> az=NA
+    -> toa_us=0
+
+alert > 0 + closure <= 1.50
+    -> TARGET detected=1
+    -> TOA=VALID
+    -> loc_valid=1
+    -> azimuth/direction publicados
+
+alert > 0 + closure > 1.50
+    -> TARGET detected=1
+    -> TOA=INVALID
+    -> loc_valid=0
+    -> dir=UNKNOWN
+    -> az operacional=NA
+```
+
+Prueba RIGHT 90° de referencia:
+
+```text
+10 localizaciones válidas
+azimuth medio = 94.289°
+std           = 0.397°
+rango         = 93.56°–94.85°
+
+closure válido medio = 0.342 samples
+closure válido máximo = 0.53 samples
+```
+
+Los casos con `closure` alto fueron rechazados como `UNKNOWN`; no se relajó el umbral de `1.50 samples`.
+
+Estado:
+
+```text
+TOA-1D.2 = PASS
+```
+
+---
+
+## 56. Baseline de rendimiento previo al modo LIVE
+
+Antes de introducir free-running se cerró la base de producción:
+
+```text
+v2.1.7 + P3 + P4-B + P4-E5 + CACHE0/MPU-FIX
++ P5-C + P5-D + P5-G + P5-H + Production Clean
+```
+
+Configuración relevante:
+
+```text
+C optimization   = O3
+C++ optimization = O2
+cache             = OFF
+linker            = original validado
+```
+
+Rendimiento típico previo:
+
+```text
+detector          ≈ 412 ms
+TOA 100 ms        ≈ 313 ms
+detector + TOA    ≈ 725 ms
+queue_high        = 1
+errors            = 0
+```
+
+No se adoptó aumentar la cola como solución primaria de rendimiento.
+
+---
+
+## 57. TOA-1E.1 — free-running LIVE
+
+Objetivo: eliminar el límite histórico de 16 órdenes manteniendo la arquitectura productor-consumidor y permitiendo STOP limpio al final del segundo actual.
+
+Semántica actual:
+
+```text
+START
+  -> captura continua
+  -> procesamiento por segundo
+  -> detector
+  -> TOA si alert > 0
+  -> repetir indefinidamente
+
+STOP_REQUEST
+  -> terminar segundo actual
+  -> terminar procesamiento pendiente
+  -> cerrar captura
+  -> STOPPED
+```
+
+La API LIVE quedó identificada con:
+
+```text
+AUDIO_RECORDER_LIVE_MODE    = 1
+AUDIO_RECORDER_LIVE_API_REV = 0x0001E102
+```
+
+Prueba de validación:
+
+```text
+frames        = 1,367,100
+sample rate   = 44,100 Hz
+captura total = 31.0 s
+calibración   = 3 s
+LIVE útil     = 28 s
+seq final     = 28
+```
+
+Resultado de cierre:
+
+```text
+reason=stop_requested
+queue_high=1
+errors=0
+proc_us_max=728246 us
+```
+
+Se superó claramente el límite histórico de 16 chunks y el STOP se realizó después de completar/procesar el segundo en curso.
+
+Estado:
+
+```text
+TOA-1E.1 FREE-RUNNING = PASS
+```
+
+En modo LIVE actual no se retienen chunks de audio para transferencia histórica y el final informa:
+
+```text
+transfer=disabled
+json=disabled
+```
+
+---
+
+## 58. TOA-1E.2 — monitor visual LIVE y exploración espacial
+
+Se creó una aplicación Tkinter para observar el pipeline en tiempo real sin alterar el detector/localizador.
+
+Campos mostrados:
+
+```text
+alert / semáforo
+probabilidad fused
+nivel acústico relativo
+TOA status
+azimuth RAW
+direction RAW
+closure
+rho experimental
+elevation experimental
+trayectoria angular RAW
+```
+
+Semáforo:
+
+```text
+0 -> SIN ALERTA
+1 -> ALERTA MANTENIDA
+2 -> DRON LEJANO
+3 -> DRON CERCANO
+```
+
+El nivel mostrado es relativo a baseline y **no es SPL calibrado**.
+
+### 58.1 Escalas 2D preliminares
+
+A partir de campañas cardinales estáticas se adoptaron para visualización:
+
+```text
+H_SCALE = 8.6000 samples
+V_SCALE = 14.7700 samples
+```
+
+Son escalas empíricas del montaje actual, no constantes universales.
+
+### 58.2 Elevation / ZENITH experimental
+
+Se definió:
+
+```text
+ux  ~ -H / H_SCALE
+uy  ~  V / V_SCALE
+rho = sqrt(ux^2 + uy^2)
+```
+
+Bajo la hipótesis temporal de hemisferio superior:
+
+```text
+rho -> 1  : dirección cerca del horizonte
+rho -> 0  : dirección cerca del eje vertical
+```
+
+Durante una prueba dinámica, cuando la fuente fue colocada físicamente encima y centrada, aparecieron tres resultados consecutivos compatibles con ZENITH:
+
+```text
+rho      ≈ 0.138–0.159
+elev_exp ≈ 80.8°–82.1°
+closure  ≈ 0.12–0.32 samples
+```
+
+Esto se considera evidencia prometedora, no validación final de elevación. `ZENITH_CANDIDATE` continúa siendo experimental.
+
+---
+
+## 59. Diagnóstico UP/DOWN y TOA-1E.3A multi-peak
+
+Las campañas estáticas demostraron que los `UNKNOWN` no provenían únicamente del movimiento. En UP/DOWN, algunos pares cambiaban entre máximos alternativos de correlación aun con la fuente quieta.
+
+Ejemplos observados:
+
+```text
+DOWN: LT puede saltar de ~-15 samples a ~-6 samples
+UP:   TB/TR/LR/BR/LB pueden seleccionar familias alternativas
+```
+
+Una correlación alta por sí sola no garantiza que el máximo sea el TDOA físicamente correcto.
+
+TOA-1E.3A añadió, sin cambiar todavía la decisión final, los tres mejores picos locales por pareja:
+
+```text
+P1 = máximo principal
+P2 = segundo candidato
+P3 = tercer candidato
+```
+
+Build E3A:
+
+```text
+text = 905632 B
+data = 512 B
+bss  = 450720 B
+0 errors
+0 warnings
+```
+
+Resultado decisivo: en los `INVALID` de UP aparecía frecuentemente un P2 capaz de reducir closure por debajo de `1.50`; en DOWN se observó al menos un caso donde el candidato correcto estaba en P3.
+
+Ejemplo UP:
+
+```text
+LR P1 ~= +3.65, corr ~= 0.496
+LR P2 ~= +0.52, corr ~= 0.494
+
+closure P1 ~= 3.81
+closure P2 ~= 0.68
+```
+
+Ejemplo DOWN:
+
+```text
+LT P1 ~= -9.33, corr ~= 0.386
+LT P3 ~= -15.43, corr ~= 0.320
+
+closure P1 ~= 6.22
+closure P3 ~= 0.12
+```
+
+Conclusión:
+
+```text
+la información correcta suele existir,
+pero no siempre es el máximo individual de correlación.
+```
+
+---
+
+## 60. TOA-1E.3B — solver global multi-peak
+
+E3B cambió la selección de TDOA sólo cuando P1 era incoherente.
+
+Fast path:
+
+```text
+si P1 ya cumple closure <= 1.50
+    -> conservar P1 exactamente
+    -> no ejecutar búsqueda combinatoria
+```
+
+Fallback:
+
+```text
+P1/P2/P3 de 6 pares
+    -> hasta 3^6 = 729 combinaciones
+    -> calcular closure de cada combinación
+    -> exigir closure <= 1.50
+    -> exigir score de correlación >= 95% del score P1
+    -> elegir mejor score; closure como criterio secundario
+```
+
+Las 729 combinaciones no recalculan Pearson ni recorren las 4410 muestras; trabajan sobre candidatos ya calculados.
+
+Build E3B:
+
+```text
+text = 907192 B
+data = 512 B
+bss  = 450720 B
+0 errors
+0 warnings
+```
+
+### 60.1 UP estático
+
+Prueba E3B:
+
+```text
+22 TOA evaluados
+RAW P1: 20 VALID / 2 INVALID = 90.91%
+E3B:    21 VALID / 1 INVALID = 95.45%
+```
+
+El caso recuperado cambió únicamente un candidato y redujo:
+
+```text
+closure 4.84 -> 0.93
+score ratio = 0.998
+```
+
+El caso no recuperado fue correctamente mantenido como `UNKNOWN` porque las combinaciones geométricas restantes requerían una degradación de score excesiva y podían apuntar al hemisferio equivocado.
+
+Por tanto se mantuvo:
+
+```text
+ratio_min = 0.95
+```
+
+### 60.2 DOWN estático
+
+En una ejecución estable, el tramo estático dio:
+
+```text
+14/14 localizaciones válidas = 100%
+azimuth medio ≈ 176.05°
+std ≈ 0.34°
+closure medio ≈ 0.221 samples
+```
+
+La pequeña desviación respecto a 180° correspondía a colocación manual y no se utilizó para declarar error angular absoluto.
+
+### 60.3 ROT360 antes de confidence
+
+Con E3B, una rotación completa produjo aproximadamente:
+
+```text
+75 mediciones TOA evaluadas
+65 VALID
+10 INVALID
+VALID ≈ 86.7%
+```
+
+El solver recuperó numerosas ventanas que con P1 aislado habrían sido rechazadas.
+
+---
+
+## 61. Monitor RAW v3 — continuidad visual sin inventar líneas
+
+La polyline RAW original unía cualquier par de mediciones válidas consecutivas, incluso si el salto espacial era muy grande. Eso podía dibujar una línea completa atravesando el radar durante PLAY/STOP o cambios bruscos.
+
+Se corrigió sólo en el monitor PC:
+
+```text
+todos los puntos RAW se conservan
+pero la línea sólo une muestras consecutivas
+si el salto espacial <= 20° por defecto
+```
+
+Un punto separado continúa visible; simplemente no se inventa una trayectoria entre posiciones discontinuas.
+
+Esto no es tracking.
+
+---
+
+## 62. TOA-1E3.2 — Measurement Confidence + Track Gate
+
+TOA-1E3.2 es el **checkpoint STM32 actual**.
+
+No cambia:
+
+```text
+detector
+TOA 100 ms
+correlación
+multi-peak
+closure
+azimuth
+VALID/INVALID
+```
+
+Añade una capa de confianza a las mediciones TOA válidas.
+
+Un par se considera ambiguo cuando:
+
+```text
+P1_corr - P2_corr <= 0.020
+```
+
+Clasificación v1:
+
+```text
+HIGH:
+    P1 ya era válido
+    solver no intervino
+    0 pares ambiguos
+    closure <= 0.80
+
+MEDIUM:
+    TOA válido
+    pero no cumple HIGH ni LOW
+
+LOW:
+    >= 2 pares ambiguos
+
+NONE:
+    INVALID o NOT_EVALUATED
+```
+
+Gate para tracking:
+
+```text
+HIGH   -> track_eligible=1
+MEDIUM -> track_eligible=1
+LOW    -> track_eligible=0
+NONE   -> track_eligible=0
+```
+
+Una medición `LOW` **sigue siendo TOA=VALID** y no se borra del RAW. Sólo queda fuera del futuro tracker.
+
+No se usa `rel_db` como threshold rígido de rechazo y no se usa `rho/elevation` para confidence, para no acoplar la regla a la distancia de prueba actual ni bloquear ZENITH antes de validarlo.
+
+### 62.1 Build
+
+```text
+text = 908616 B
+data = 512 B
+bss  = 450736 B
+0 errors
+0 warnings
+```
+
+### 62.2 UP estático
+
+```text
+25 TOA evaluados válidos
+25/25 VALID = 100%
+HIGH   = 25
+MEDIUM = 0
+LOW    = 0
+track_eligible = 25/25
+```
+
+### 62.3 PLAY/STOP agresivo
+
+Las mediciones con varios picos prácticamente empatados empezaron a aparecer como:
+
+```text
+TOA=VALID
+confidence=LOW
+track=0
+```
+
+y se dibujan como `X` en la GUI.
+
+Una `X` no significa "error confirmado". Significa:
+
+```text
+medición RAW geométricamente válida,
+pero acústicamente ambigua y no apta
+para actualizar el tracker.
+```
+
+### 62.4 ROT360 E3.2 — validación del checkpoint
+
+Resultado:
+
+```text
+records          = 79
+TOA evaluados    = 72
+VALID            = 65
+INVALID          = 7
+TOA VALID        = 90.3%
+
+HIGH             = 42
+MEDIUM           = 20
+LOW              = 3
+track_eligible   = 62 / 65 = 95.4% de los VALID
+
+queue_high       = 1
+errors           = 0
+toa_us_max       = 297921 us
+proc_us_max      = 711855 us
+```
+
+Sólo tres mediciones válidas de toda la vuelta quedaron marcadas `LOW`, mientras la trayectoria útil cubrió prácticamente la circunferencia completa.
+
+Estado:
+
+```text
+TOA-1E3.2 = PASS / CHECKPOINT ESTABLE
+```
+
+Antes de cualquier cambio importante conviene conservar en Git una referencia equivalente a:
+
+```text
+toa-1e3.2-checkpoint
+```
+
+---
+
+## 63. TOA-1F.1 — primer tracker temporal azimuthal 2D
+
+TOA-1F.1 introduce el primer tracking temporal real.
+
+**Decisión de diseño:** esta etapa se implementó únicamente en PC. El firmware STM32 E3.2 permanece congelado.
+
+Archivos PC:
+
+```text
+toa_tracker_live.py
+monitor_toa1f1_tracker.py
+analizar_toa1f1_tracker.py
+```
+
+El tracker consume la telemetría E3.2:
+
+```text
+HIGH / MEDIUM + track=1
+    -> pueden actualizar estado
+
+LOW / INVALID / NOT_EVALUATED
+    -> no actualizan posición
+    -> permiten predicción temporal corta
+```
+
+`ZENITH_CANDIDATE` no entra todavía al tracker 2D.
+
+### 63.1 Estado estimado
+
+TOA-1F.1 mantiene:
+
+```text
+azimuth trackeado
+velocidad angular [deg/s]
+residual medición-predicción
+número de misses consecutivos
+estado temporal
+```
+
+Estados:
+
+```text
+EMPTY
+ACQUIRING
+TRACKING
+COASTING
+REACQUIRED
+LOST
+```
+
+Fuentes:
+
+```text
+MEASUREMENT
+PREDICTION
+REACQUIRE
+NONE / REJECTED
+```
+
+### 63.2 Algoritmo v1
+
+Filtro circular alpha-beta con modelo de velocidad angular aproximadamente constante.
+
+El azimuth se maneja internamente desenrollado, por lo que:
+
+```text
+350 -> 355 -> 359 -> 1 -> 5
+```
+
+se interpreta como continuidad y no como un salto de `-358°`.
+
+Parámetros iniciales congelados:
+
+```text
+alpha HIGH                    = 0.72
+beta HIGH                     = 0.16
+alpha MEDIUM                  = 0.52
+beta MEDIUM                   = 0.08
+base gate                     = 22°
+max gate                      = 45°
+max angular velocity          = 60°/s
+max coast                     = 3 frames/segundos
+reacquire_count               = 2
+reacquire consistency         = 25°
+```
+
+Comportamiento:
+
+```text
+medición elegible dentro del gate
+    -> TRACKING / update
+
+LOW / INVALID / NOT_EVALUATED
+    -> COASTING hasta 3 gaps
+
+4º gap consecutivo
+    -> LOST
+    -> romper polyline
+
+medición muy lejos de predicción
+    -> no teletransportar
+    -> primera medición queda pendiente/rechazada
+    -> segunda medición coherente en nueva zona
+       permite REACQUIRED
+```
+
+### 63.3 Visualización F1
+
+La GUI muestra simultáneamente:
+
+```text
+RAW azul              = HIGH/MEDIUM elegible
+X roja                = LOW RAW, no elegible
+TRACK naranja sólido  = update por medición
+TRACK naranja dashed  = predicción durante COASTING
+cuadrado naranja      = REACQUIRED
+```
+
+El track se dibuja sobre un anillo azimuthal fijo; no usa `rho` para no mezclar tracking 2D validado con elevación experimental.
+
+### 63.4 Replay offline de la ROT360 E3.2
+
+Ejecutado con:
+
+```powershell
+python analizar_toa1f1_tracker.py e3_2_ROT360.csv
+```
+
+Resultado de referencia:
+
+```text
+rows=79
+input_track_eligible=62
+input_low=3
+input_invalid=7
+input_not_evaluated=7
+
+state_empty=3
+state_acquiring=1
+state_tracking=61
+state_coasting=13
+state_reacquired=0
+state_lost=1
+
+source_measurement=62
+source_prediction=13
+source_reacquire=0
+source_rejected=0
+source_none=4
+
+accepted_updates=62
+rejected_measurements=0
+accepted_abs_residual_mean_deg=3.368
+accepted_abs_residual_median_deg=2.616
+accepted_abs_residual_max_deg=17.806
+```
+
+El tracker aceptó las 62 entradas E3.2 elegibles y rellenó 13 gaps cortos mediante predicción sin romper la ROT360 previamente validada.
+
+### 63.5 Primera prueba LIVE F1 — UP estático
+
+Comando usado:
+
+```powershell
+python monitor_toa1f1_tracker.py --port COM6 --h-scale 8.6000 --v-scale 14.7700 --csv f1_UP_static.csv
+```
+
+Resultado STM32/E3.2 de la sesión:
+
+```text
+records       = 25
+no_target     = 2
+target_valid  = 22
+target_invalid= 1
+
+confidence HIGH   = 19
+confidence MEDIUM = 3
+confidence LOW    = 0
+track_eligible    = 22
+
+queue_high    = 1
+errors        = 0
+toa_us_max    = 297908 us
+proc_us_max   = 712439 us
+```
+
+Resultado del tracker:
+
+```text
+25 frames TRACK emitidos
+EMPTY      = 2
+ACQUIRING  = 1
+TRACKING   = 21
+COASTING   = 1
+REACQUIRED = 0
+LOST       = 0
+
+MEASUREMENT = 22
+PREDICTION  = 1
+rejected    = 0
+```
+
+El único TOA `INVALID` de la sesión produjo correctamente:
+
+```text
+TRACK state=COASTING
+source=PREDICTION
+```
+
+sin mover el track a la solución RAW incoherente. En el siguiente segundo, una medición HIGH válida volvió a actualizar normalmente.
+
+Estabilidad temporal observada:
+
+```text
+tracker azimuth aprox. = 354.95°–356.75°
+media aprox.            = 355.74°
+|omega| máximo aprox.   = 0.20°/s
+omega final             ≈ 0.01°/s
+residual abs medio      ≈ 0.64°
+residual abs mediano    ≈ 0.52°
+residual abs máximo     ≈ 2.26°
+```
+
+Estado actual:
+
+```text
+TOA-1F.1 replay ROT360 = PASS
+TOA-1F.1 UP estático   = PASS
+```
+
+---
+
+## 64. PRÓXIMA PRUEBA AL CONTINUAR EN NUEVO CHAT — TOA-1F.1 ROT360 CW lenta
+
+Esta es la **próxima prueba exacta**. No modificar firmware ni parámetros del tracker antes de realizarla.
+
+Firmware:
+
+```text
+mantener exactamente TOA-1E3.2 checkpoint
+NO recompilar STM32 por cambios de tracking
+```
+
+PC:
+
+```text
+toa_tracker_live.py
+monitor_toa1f1_tracker.py
+```
+
+Comando:
+
+```powershell
+python monitor_toa1f1_tracker.py --port COM6 --h-scale 8.6000 --v-scale 14.7700 --csv f1_ROT360_CW_slow.csv
+```
+
+### 64.1 Procedimiento
+
+1. Mantener el array fijo.
+2. Mantener el teléfono aproximadamente a la misma altura del plano del array.
+3. Usar inicialmente un radio aproximado de 50 cm sólo como banco de prueba; este valor **no es el límite futuro del sistema**.
+4. Mantener el altavoz del teléfono orientado hacia el centro del array durante el recorrido, si es posible.
+5. Dejar los primeros 3 s de calibración sin sonido de dron; idealmente esperar 1–2 s adicionales antes de iniciar el PLAY.
+6. Comenzar cerca de UP / 0°.
+7. Mantener la fuente quieta 2–3 s.
+8. Hacer una vuelta horaria completa y suave:
+
+```text
+0° -> 90° -> 180° -> 270° -> 360°
+```
+
+9. Usar aproximadamente 35–40 s para la vuelta efectiva.
+10. Al volver a UP, mantener 2–3 s quieto.
+11. Solicitar STOP y conservar ambos archivos:
+
+```text
+f1_ROT360_CW_slow.csv
+f1_ROT360_CW_slow_uart.log
+```
+
+### 64.2 Qué validar
+
+Comparar RAW vs TRACK y cuantificar:
+
+```text
+TOA VALID / INVALID
+HIGH / MEDIUM / LOW
+track_eligible
+
+TRACKING frames
+COASTING frames
+REACQUIRED
+LOST
+rejected_measurements
+
+residual medio / mediano / máximo
+velocidad angular estimada
+continuidad al cruzar 359° -> 0°
+```
+
+Criterios deseados para esta primera vuelta:
+
+```text
+- el track naranja debe recorrer prácticamente toda la circunferencia;
+- gaps RAW cortos deben convertirse en COASTING/predicción;
+- no debe existir teleport del track;
+- 359° -> 0° debe mantenerse continuo;
+- LOW/INVALID no deben actualizar directamente el estado;
+- un punto dudoso aislado no debe romper la trayectoria;
+- queue_high debe permanecer en 1;
+- errors debe permanecer en 0;
+- proc_us debe permanecer claramente por debajo de 1 s.
+```
+
+No ajustar `gate`, `max_coast`, `max_omega`, ganancias alpha/beta ni ventana TOA antes de analizar esta prueba.
+
+### 64.3 Prueba posterior si ROT360 CW pasa
+
+Después de analizar ROT360 CW:
+
+```text
+Prueba 3 -> PLAY/STOP + saltos grandes
+```
+
+Objetivo:
+
+```text
+- comprobar rechazo de un salto aislado;
+- comprobar COASTING;
+- comprobar LOST tras >3 gaps;
+- comprobar REACQUIRED tras 2 mediciones coherentes en una nueva zona;
+- verificar que no se une con una línea falsa la trayectoria anterior y la nueva.
+```
+
+Sólo después se harán ROT360 media/rápida y comparación de ventanas TOA `100 / 75 / 50 ms`.
+
+---
+
+## 65. Roadmap inmediato después de TOA-1F.1
+
+Orden recomendado, sin saltar etapas:
+
+```text
+1. F1 ROT360 CW lenta
+2. F1 PLAY/STOP + salto grande
+3. F1 ROT360 velocidad media
+4. F1 ROT360 rápida
+5. cuantificar límite dinámico del tracker
+6. comparar ventana TOA 100 / 75 / 50 ms
+7. retomar elevación / ZENITH formal
+8. extender estado temporal a vector de dirección 3D
+9. validar distancias 0.5 / 1 / 2 / 3 / 5 m o mayores según entorno
+10. preparar salida downstream por UART y posteriormente CAN/CAN-FD
+```
+
+La distancia de 50 cm usada hasta ahora es sólo experimental. El objetivo futuro es operar a varios metros. El máximo lag físico no debe crecer por aumentar la distancia a la fuente; depende principalmente de la geometría del array y de la velocidad del sonido. Lo que sí cambiará a distancia será SNR, reverberación, directividad y robustez de correlación/detección.
+
+---
+
+## 66. Reglas de continuidad para el siguiente chat
+
+Al abrir un nuevo chat dentro del mismo proyecto, usar este README como estado base y mantener estas reglas:
+
+```text
+- no revertir TOA-1E3.2;
+- no cambiar firmware durante la primera validación F1;
+- preservar RAW aunque exista TRACK;
+- distinguir medición RAW de predicción TRACK;
+- LOW no significa falso confirmado;
+- UNKNOWN/INVALID no debe convertirse silenciosamente en medición válida;
+- no declarar exactitud angular absoluta sin ground truth medido;
+- ZENITH/elevation continúan experimentales;
+- tracker actual es 2D azimuthal, no 3D;
+- no estimamos distancia/range todavía;
+- no usar thresholds rígidos de rel_db que dependan de estar a 50 cm;
+- mantener closure=1.50 y ratio_min=0.95 hasta nueva campaña controlada;
+- mantener H_SCALE=8.6000 y V_SCALE=14.7700 sólo como calibración actual de visualización;
+- no aumentar cola como solución primaria de rendimiento;
+- guardar siempre CSV + UART log de cada prueba;
+- entregar archivos separados, no ZIP.
+```
+
+Prompt sugerido para iniciar el siguiente chat:
+
+```text
+Continuemos STM32 + Khamex desde README_SoundDetection.md.
+Toma como historial de referencia los chats del proyecto "STM32 + Khamex" y "Continuidad STM32 Khamex".
+El checkpoint STM32 actual es TOA-1E3.2 y el trabajo en curso es TOA-1F.1 tracker azimuthal 2D.
+Ya pasaron el replay ROT360 y la prueba UP estática de F1.1.
+La siguiente prueba es ROT360 CW lenta descrita en la sección 64 del README.
+No cambies firmware ni parámetros antes de analizar esa prueba.
+```
+
+
+---
+
+## 67. TOA-1F.1 — cierre de campaña LIVE 2D con movimiento (2026-10-19)
+
+Esta sección **actualiza el estado operativo** posterior a las secciones históricas 63–66, que se conservan sin borrar. No se ha cambiado el firmware STM32 `TOA-1E3.2`, la ventana TOA de 100 ms ni los parámetros PC del tracker `TOA-1F.1` durante esta campaña. Se conservaron RAW, confidence, TRACK y logs UART.
+
+### 67.1 Ensayos completados
+
+- Replay offline sobre ROT360 E3.2: PASS (registrado en sección 63).
+- UP estático LIVE: PASS (registrado en sección 63).
+- ROT360 CW lenta: vuelta completa, continuidad circular y COASTING; PASS de esa prueba, sin garantizar precisión angular absoluta.
+- PLAY/STOP + salto grande: COASTING, LOST, rechazo y REACQUIRED observados; validación funcional con limitaciones de latencia y repetibilidad.
+- ROT360 CW media: dos sesiones, con huecos TOA y reacquisición; continuidad incompleta.
+- ROT360 CW rápida: dos sesiones, con 19 s y 17 s por vuelta declarados por operador; continuidad degradada, pero detector, TOA y captura siguen operando.
+
+Los tiempos indicados por el operador son aproximados; el contador de la GUI y la duración total del CSV incluyen adquisición/calibración y pueden diferir de la duración efectiva del movimiento. A radio nominal de 0.50 m, 19 s equivalen a 18.95 deg/s y 0.165 m/s, y 17 s a 21.18 deg/s y 0.185 m/s; estas cifras no representan velocidades instantáneas ni una prueba con ground truth.
+
+### 67.2 Comparativa calculada desde los CSV de F1.1
+
+Las columnas `VALID`, `INVALID` y `NOT_EVALUATED` son mutuamente excluyentes. `HIGH/MEDIUM/LOW` sólo cuentan mediciones TOA VALID. `used` cuenta filas con `tracker_measurement_used=1`, incluidos los eventos de reacquisición; `rejected` cuenta filas con `tracker_measurement_rejected=1` (eventos, no necesariamente direcciones distintas).
+
+| Ensayo | Registros | VALID / evaluados | INVALID | NOT_EVALUATED | H/M/L | Elegibles | used | rejected | COASTING | LOST | REACQUIRED | max abs omega estimada |
+|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| ROT360 CW lenta | 39 | 33/37 (89.2%) | 4 | 2 | 22/11/0 | 33 | 33 | 0 | 4 | 0 | 0 | 15.17 deg/s |
+| ROT360 CW media 1 | 33 | 25/30 (83.3%) | 5 | 3 | 18/7/0 | 25 | 24 | 2 | 6 | 0 | 1 | 17.26 deg/s |
+| ROT360 CW media 2 | 35 | 27/33 (81.8%) | 6 | 2 | 16/9/2 | 25 | 23 | 3 | 9 | 1 | 1 | 23.68 deg/s |
+| ROT360 CW rápida 1 | 19 | 14/17 (82.4%) | 3 | 2 | 8/6/0 | 14 | 12 | 3 | 5 | 0 | 1 | 33.98 deg/s |
+| ROT360 CW rápida 2 | 17 | 11/15 (73.3%) | 4 | 2 | 8/3/0 | 11 | 8 | 4 | 6 | 1 | 1 | 34.16 deg/s |
+
+Cuidado: el máximo `omega` reportado es la estimación del filtro alpha-beta y puede incluir saltos de reacquisición. **No** es un límite físico validado ni la velocidad angular real medida del teléfono. No se calculó error absoluto sin referencia mecánica de ángulo y tiempo.
+
+### 67.3 Dos sesiones rápidas: comportamiento confirmado
+
+**FAST 1 (19 s por vuelta reportados)**: en `seq=17`, RAW=335.34 deg y TRACK=333.90 deg, omega=+33.98 deg/s. Tras TOA INVALID en `seq=18` y retorno RAW=335.65 deg en `seq=19`, el TRACK se predijo hasta 41.86 deg; la observación fue rechazada con residual de -66.21 deg y gate=45 deg. La dirección naranja final era **PREDICTION**, no una nueva localización acústica.
+
+**FAST 2 (17 s por vuelta reportados)**: dos TOA INVALID consecutivos en `seq=4–5`, cuando el tracker todavía tenía omega=0, precedieron un rechazo en `seq=6` (RAW 23.00 deg), `LOST` en `seq=7` (RAW 58.88 deg), `ACQUIRING` en `seq=8` (RAW 96.03 deg) y `REACQUIRED` en `seq=10` (RAW 153.67 deg). Se observa respuesta correcta de estados de seguridad, pero no seguimiento continuo.
+
+**Lectura conjunta**: en la primera parte de las vueltas la velocidad angular aún no está bien estimada; si TOA produce gaps, la predicción puede quedarse atrás. Tras aprender una velocidad positiva alta, si la fuente se detiene, COASTING puede adelantar la dirección por extrapolación. No aceptar mediciones fuera de gate sin validación, ni convertir LOW/INVALID en mediciones útiles para «suavizar» la trayectoria.
+
+### 67.4 Salud del STM32 / captura
+
+| Sesión | queue_high | errors | proc_us_max |
+|---|---:|---:|---:|
+| ROT360 CW lenta | 1 | 0 | 712722 us |
+| ROT360 CW media 1 | 1 | 0 | 712857 us |
+| ROT360 CW media 2 | 1 | 0 | 712159 us |
+| ROT360 CW rápida 1 | 1 | 0 | 712675 us |
+| ROT360 CW rápida 2 | 1 | 0 | 713283 us |
+
+En ambas pruebas FAST el UART confirma MFCC/TFLite ejecutados en los cuatro canales en todas las ventanas LIVE; no hay evidencia de saturación de CPU ni error de captura. El reloj de captura y el procesamiento de bloques no deben confundirse con un nuevo resultado angular cada 100 ms: la cadencia de salida sigue siendo aproximadamente 1 Hz.
+
+### 67.5 Incidencia física SEL durante PLAY/STOP
+
+Hubo una sesión con baselines cerca de -24 dBFS y activación acústica muy limitada (CH1/CH2 sin ejecución del modelo). Tras ajustar empalmes, en particular los contactos mecánicamente inestables de SEL en los adaptadores de micrófono, mejoraron marcadamente las detecciones y el nivel de referencia. Se registra **hipótesis de contacto intermitente**, no causa eléctrica definitivamente medida. No usar sesiones con montaje dudoso como prueba de cambio de algoritmo.
+
+### 67.6 Veredicto y decisión de continuidad
+
+```text
+TOA-1E3.2 (STM32)                    = CHECKPOINT ESTABLE, NO MODIFICAR
+TOA-1F.1 replay / UP estático        = PASS
+TOA-1F.1 ROT360 CW lenta             = PASS funcional
+TOA-1F.1 PLAY/STOP                   = validación funcional; incidencias físicas registradas
+TOA-1F.1 ROT360 media (x2)           = PASS PARCIAL; continuidad incompleta
+TOA-1F.1 ROT360 rápida (x2)          = PASS PARCIAL; continuidad incompleta
+Límite dinámico operacional exacto   = NO DETERMINADO
+Accuracy angular absoluta            = NO EVALUADA SIN GROUND TRUTH
+F1.1 campaña física inicial          = COMPLETADA / datos suficientes para replay comparativo
+```
+
+No repetir rotaciones por rutina. Las métricas sobre CSV deben distinguir tasas de disponibilidad TOA, actualizaciones realmente usadas, rechazos, predicciones, cambios de segmento y retardo/reacquisición. La línea naranja visualmente continua no constituye por sí misma un PASS.
+
+### 67.7 Próximo paso EXACTO después del commit/push
+
+**F1.1 — análisis offline y A/B del tracker 2D sobre los CSV existentes, antes de cualquier nuevo cambio de firmware.** No se ha aplicado ningún cambio alpha-beta/gate ni se declara versión F1.2. Usar como baseline el algoritmo F1.1 congelado; reproducir cada una de las cinco ROT360 cronológicamente con timestamps originales, sin mirar datos futuros ni alterar `raw_az`, `toa_status` o `confidence`. Comparar configuraciones candidatas sólo en PC, con reglas de elegibilidad HIGH/MEDIUM intactas. Reportar: `used`, `rejected`, COASTING/LOST/REACQUIRED, error de predicción frente a la próxima medición válida, longitud/duración de gaps, saltos entre segmentos y overshoot tras STOP. No evaluar error angular absoluto sin ground truth. No premiar la simple continuidad visual ni aceptar teleport.
+
+Archivos base (CSV + UART separados):
+
+```text
+f1_ROT360_CW_slow(1).csv
+f1_ROT360_CW_slow_uart(1).log
+f1_ROT360_CW_medium.csv
+f1_ROT360_CW_medium_uart.log
+f1_ROT360_CW_medium2.csv
+f1_ROT360_CW_medium2_uart.log
+f1_ROT360_CW_fast.csv
+f1_ROT360_CW_fast_uart.log
+f1_ROT360_CW_fast2.csv
+f1_ROT360_CW_fast2_uart.log
+```
+
+Criterio para avanzar: si surge una mejora consistente, documentar parámetros, comparativa y regresiones antes de promover un nuevo checkpoint PC. Si no hay mejora confiable, conservar F1.1 como baseline documentado. **En ambos casos, la etapa siguiente del roadmap es comparar ventanas TOA 100/75/50 ms** (una variable por experimento). Después: elevación/ZENITH, tracker 3D, distancias 0.5–5 m, stress tests e integración UART/CAN-FD.
+
+---
+
+## 68. CHECKPOINT — elevacion/ZENITH y auditoria offline F1.1 (2026-10-21)
+
+**Estado:** ensayos exploratorios terminados; **no se modificaron** firmware W100 / TOA, solver, tracker F1.1 ni monitor 3D. Referencia fisica confirmada (vista superior, UP hacia arriba): MIC7=LEFT (superior izquierda), MIC2=RIGHT (superior derecha), MIC5=BACK (inferior izquierda), MIC6=TOP (inferior derecha). Geometria G3 aproximada, no calibracion definitiva.
+
+### 68.1 Dos rondas de posiciones estaticas
+
+12 capturas independientes de ~25 s a 50 cm nominales (60, 75, 90, 105, 120 y 150 grados, dos rondas). **199 TOA VALID, 35 INVALID y 40 NOT_EVALUATED**; 199/234 = **85.0 %** de validez entre evaluados. Angulos siguientes calculados **offline**, no son las elevaciones del monitor original.
+
+| Posicion | Modelo B con H corregido, ronda 1 | Ronda 2 | Observacion |
+|---|---:|---:|---|
+| 60° | 66.41° | 66.83° | Desviacion +6 a +7° reproducida |
+| 75° | 75.13° | 75.67° | Cercano al nominal |
+| 90° ZENITH | 90.23° | 88.68° | Cercano al nominal; dispersion entre ventanas |
+| 105° | 104.99° | 104.95° | Muy repetible |
+| 120° | 116.69° | 118.59° | R1 incluye solucion opuesta anomala; R2 solo 9/20 TOA validos |
+| 150° | 150.95° | 150.88° | Muy repetible |
+
+### 68.2 Modelos y calibracion
+
+- Auditoria de correlacion: lag positivo `AB` corresponde a llegada posterior en `B`; los seis TDOA respetan razonablemente sus cierres algebraicos. La geometria fisica hace incorrecta la suma horizontal original: **H experimental = (LR - TB)/2**, manteniendo **V = (LT - BR)/2**. La mejora ZENITH es de **reprocesamiento offline**, no incorporada a firmware.
+- Geometria XYZ **G3** reconstruida con distancias/alturas manuales redondeadas: mas representativa fisicamente pero no mejora todas las posiciones ni explica por completo los residuos TDOA. Permitir desplazamiento lateral o ajustar sesgos constantes por canal tampoco mejoro consistentemente el error angular en validacion.
+- Comparacion entre rondas: error absoluto medio por ventana, **B corregido 2.72°** frente a **G3 3.03°** sin nueva calibracion. Calibracion B **por tramos 2.11°** en validacion cruzada entre rondas, pero comparte los mismos angulos nominales de entrenamiento y prueba; **no valida generalizacion a angulos nuevos**. No implementar offsets ni calibracion todavia.
+
+### 68.3 Correlacion, anomalias y seguimiento
+
+- **112/199** soluciones VALID (**56.3 %**) requirieron recuperacion global de picos; no rechazar sistematicamente `recovered=1`.
+- **120°, ronda 1, seq=11:** solucion TOA algebraicamente valida pero direccion opuesta (~357.77° RAW frente a ~198.44° predicho); F1.1 la rechazo. Otra desviacion en `seq=23` (~103.45° segun B corregido) tuvo cierre bajo y confianza HIGH: closure/confidence no garantizan exactitud absoluta.
+- Limites geometricos G3 identificaron **509/3582 candidatos** alternativos fuera de rango con tolerancia de 0.5 muestras; **ninguno de los finalmente seleccionados** en las 199 ventanas VALID. Son limites diagnosticos, no autorizan aun cambios en el solver.
+- Filtro temporal estatico de 25°: marco la inversion a 120°, pero rechazaria **76/110** TOA VALID de cinco rotaciones F1.1; **descartado** para integracion.
+- Auditoria con predictor F1.1 (azimuth + velocidad angular): en cinco rotaciones, criterio fijo de innovacion 25° marco **15/110** y adaptativo experimental **9/110** (103 evaluables). De las nueve marcas adaptativas, cinco ya estaban rechazadas por F1.1 y cuatro habian sido usadas; **sin ground truth dinamico no es posible considerarlas errores**. F1.1 original permanece como baseline.
+
+**Decision:** no tercera ronda completa por rutina; para validar futuras modificaciones, reservar capturas controladas e independientes de **60°, 90° y 120°**, idealmente con soporte mecanico y referencia angular. Proximo estudio offline: seleccion de candidatos/peaks y plausibilidad fisica antes del tracker, sin cambiar W100/F1.1 ni confundir clase `DRON CERCANO/LEJANO` con distancia geometrica.

@@ -76,6 +76,10 @@ typedef struct
     float h_samples;
     float v_samples;
     float azimuth_deg;
+    float tetra_elevation_deg;
+    float tetra_norm;
+    float tetra_rms_samples;
+    uint8_t tetra_fit_ok;
     float closure_error_samples;
     float closure_e1_samples;
     float closure_e2_samples;
