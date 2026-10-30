@@ -188,7 +188,7 @@ bool portenta_sdram_init(void)
     s_hsdram1.Init.WriteProtection = FMC_SDRAM_WRITE_PROTECTION_DISABLE;
     s_hsdram1.Init.SDClockPeriod = FMC_SDRAM_CLOCK_PERIOD_2;
     s_hsdram1.Init.ReadBurst = FMC_SDRAM_RBURST_ENABLE;
-    s_hsdram1.Init.ReadPipeDelay = FMC_SDRAM_RPIPE_DELAY_0;
+    s_hsdram1.Init.ReadPipeDelay = FMC_SDRAM_RPIPE_DELAY_1;
 
     timing.LoadToActiveDelay = 2U;
     timing.ExitSelfRefreshDelay = 7U;

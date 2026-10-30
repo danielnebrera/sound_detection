@@ -41,6 +41,7 @@
 #include "portenta_sdram.h"
 #include "toa_localizer.h"
 #include "track3d.h"
+#include "spatial_pcm.h"
 #include "stm32h7xx.h"
 
 #include <stdbool.h>
@@ -52,6 +53,8 @@ void PeriphCommonClock_Config(void);
 static void MPU_Config(void);
 
 #define SDRAM_RUN_QUICK_BOOT_TEST  0
+/* P2: record_order=10 refers to the 10th second AFTER 3s calibration. */
+#define SPCM_TARGET_RECORD_ORDER 10U
 
 /*
  * 0: no emitir detecciones durante captura.
@@ -1204,6 +1207,10 @@ static bool process_ready_slot(uint8_t slot)
         }
     }
 
+    /* P2: copy central 100ms before the live recorder frees this slot. */
+    if ((descriptor.flags & AUDIO_SLOT_FLAG_RECORD) != 0U) {
+           (void)spatial_pcm_capture(descriptor.record_order, &view);
+    }
     return audio_recorder_complete_processing(slot, detection_cycles);
 }
 
@@ -1315,6 +1322,7 @@ int main(void)
 
 
     track3d_reset();
+    spatial_pcm_reset();
 
     if (!wait_for_record_command())
     {
@@ -1474,6 +1482,11 @@ int main(void)
             audio_recorder_close_reason_text(recorder_stats.close_reason)
         );
         uart_send(message);
+    }
+
+    /* Data follows final telemetry; the receiver must switch to binary mode. */
+    if (!spatial_pcm_transmit_after_stop()) {
+        uart_send("[SPCM_TRANSFER_ERROR]\r\n");
     }
 
     LED_OFF(LED_RED_Pin);
