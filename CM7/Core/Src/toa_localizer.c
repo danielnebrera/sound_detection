@@ -14,10 +14,21 @@
 #define TOA_CH_BACK             2U
 #define TOA_CH_RIGHT            3U
 
-#define TOA_MAX_LAG_TETRA       22
+/* Prototipo real: busqueda fisica por pareja (Fs=44100 Hz, c=343 m/s).
+ * Lag maximo = ceil(distancia_m * 44100 / 343) + 1 muestra de margen.
+ * CH0=MIC2, CH1=MIC6, CH2=MIC5, CH3=MIC7.
+ * LT=21.93 cm, LB=20 cm, LR=24 cm, TB=9 cm, TR=32.51 cm, BR=31.24 cm.
+ */
+#define TOA_MAX_LAG_LT          30
+#define TOA_MAX_LAG_LB          27
+#define TOA_MAX_LAG_LR          32
+#define TOA_MAX_LAG_TB          13
+#define TOA_MAX_LAG_TR          43
+#define TOA_MAX_LAG_BR          42
+#define TOA_MAX_LAG_GEOMETRY    TOA_MAX_LAG_TR
 #define TOA_CLOSURE_MAX_SAMPLES  1.50f
 #define TOA_PEAK_MIN_SEPARATION   2
-#define TOA_CORR_VALUE_COUNT_MAX  (2 * TOA_MAX_LAG_TETRA + 1)
+#define TOA_CORR_VALUE_COUNT_MAX  (2 * TOA_MAX_LAG_GEOMETRY + 1)
 #define TOA_SOLVER_MIN_SCORE_RATIO 0.95f
 #define TOA_SOLVER_SCORE_EPSILON   1.0e-6f
 #define TOA_CONF_AMBIGUOUS_GAP_MAX  0.020f
@@ -385,15 +396,18 @@ static uint8_t selected_boundary_flag(const ToaResult *out)
     return 0U;
 }
 
-/* Coordinates in metres: X west, Y north, Z up.
- * CH0 MIC2 south, CH1 MIC6 east, CH2 MIC5 west, CH3 MIC7 top.
+/* Prototipo REAL nominal, metros; X oeste, Y norte, Z arriba.
+ * Origen XY: centro del rectangulo imaginario de base del monitor aprobado.
+ * Origen Z: plano MIC2/MIC5/MIC7. +X aqui es OESTE (el monitor usa +X ESTE).
+ * CH0 MIC2, CH1 MIC6, CH2 MIC5, CH3 MIC7: NO alterar el orden del PCM.
+ * Son posiciones nominales visuales, no centros acusticos medidos.
  * Correlation lag (a,b) > 0 means signal reaches a before b.
  */
 static const float tetra_xyz[4][3] = {
-    { 0.00000f, -0.08660254f, 0.00000f},
-    {-0.07500f,  0.04330127f, 0.00000f},
-    { 0.07500f,  0.04330127f, 0.00000f},
-    { 0.00000f,  0.00000000f, 0.12000f}
+    { 0.12000f, -0.10000f, 0.00000f}, /* CH0 MIC2 */
+    { 0.12000f,  0.10000f, 0.09000f}, /* CH1 MIC6 */
+    { 0.12000f,  0.10000f, 0.00000f}, /* CH2 MIC5 */
+    {-0.12000f, -0.10000f, 0.00000f}  /* CH3 MIC7 */
 };
 static const uint8_t tetra_pair_ch[TOA_PAIR_COUNT][2] = {
     {0U,1U}, {0U,2U}, {0U,3U}, {1U,2U}, {1U,3U}, {2U,3U}
@@ -460,6 +474,87 @@ static bool tetra_fit(ToaResult *out)
         out->pair[TOA_PAIR_BACK_RIGHT].lag_samples);
     return true;
 }
+
+#if C42T_ENABLE
+/* C4.2-T diagnostic gate, not a replacement for the current peak solver.
+ * Enumerate 3^6 precomputed peak combinations. 'Unique' means exactly
+ * one combination satisfies the relaxed 0.90 correlation score ratio,
+ * existing closure <=1.5, the current geometry, norm 0.80..1.25,
+ * and upper-hemisphere elevation. It MUST match the chosen TOA peaks.
+ * This does not prove a true acoustic direction. No audio rescanning.
+ */
+uint8_t toa_c42t_unique_selected_hypothesis(const ToaResult *result)
+{
+    if ((result == NULL) || (result->valid == 0U) ||
+        (result->confidence != TOA_CONFIDENCE_LOW) ||
+        (result->tetra_fit_ok == 0U) ||
+        !(result->solver_raw_score > 0.0f))
+    {
+        return 0U;
+    }
+
+    uint32_t admissible = 0U;
+    uint8_t match = 0U;
+    const uint32_t combinations = 729U; /* 3^6 */
+    for (uint32_t code = 0U; code < combinations; ++code)
+    {
+        uint32_t value = code;
+        float lag[TOA_PAIR_COUNT];
+        float score = 0.0f;
+        uint8_t usable = 1U;
+        uint8_t same_as_selected = 1U;
+        for (uint32_t pair = 0U; pair < TOA_PAIR_COUNT; ++pair)
+        {
+            uint8_t idx = (uint8_t)(value % TOA_PEAK_CANDIDATE_COUNT);
+            value /= TOA_PEAK_CANDIDATE_COUNT;
+            const ToaPeakCandidate *peak = &result->pair[pair].candidate[idx];
+            if ((peak->valid == 0U) || (peak->peak_at_search_boundary != 0U))
+            {
+                usable = 0U;
+                break;
+            }
+            if (result->selected_candidate[pair] != (uint8_t)(idx + 1U))
+            {
+                same_as_selected = 0U;
+            }
+            lag[pair] = peak->lag_samples;
+            score += peak->correlation;
+        }
+        if ((usable == 0U) ||
+            (score < 0.90f * result->solver_raw_score))
+        {
+            continue;
+        }
+        float closure = 0.0f;
+        compute_closure_values(lag[0], lag[1], lag[2], lag[3], lag[4],
+                               lag[5], NULL, NULL, NULL, NULL, &closure);
+        if (closure > TOA_CLOSURE_MAX_SAMPLES)
+        {
+            continue;
+        }
+        ToaResult trial = {0};
+        for (uint32_t pair = 0U; pair < TOA_PAIR_COUNT; ++pair)
+        {
+            trial.pair[pair].lag_samples = lag[pair];
+        }
+        if (!tetra_fit(&trial) || !isfinite(trial.tetra_norm) ||
+            !isfinite(trial.tetra_elevation_deg) ||
+            (trial.tetra_norm < 0.80f) || (trial.tetra_norm > 1.25f) ||
+            (trial.tetra_elevation_deg < 0.0f) ||
+            (trial.tetra_elevation_deg > 90.0f))
+        {
+            continue;
+        }
+        ++admissible;
+        match = same_as_selected;
+        if (admissible > 1U)
+        {
+            return 0U;
+        }
+    }
+    return (admissible == 1U && match != 0U) ? 1U : 0U;
+}
+#endif /* C42T_ENABLE */
 
 static void compute_selected_geometry(ToaResult *out)
 {
@@ -798,37 +893,37 @@ bool toa_localizer_process(
             left,
             top,
             TOA_WINDOW_SAMPLE_COUNT,
-            TOA_MAX_LAG_TETRA,
+            TOA_MAX_LAG_LT,
             &out->pair[TOA_PAIR_LEFT_TOP]) ||
         !estimate_pair(
             left,
             back,
             TOA_WINDOW_SAMPLE_COUNT,
-            TOA_MAX_LAG_TETRA,
+            TOA_MAX_LAG_LB,
             &out->pair[TOA_PAIR_LEFT_BACK]) ||
         !estimate_pair(
             left,
             right,
             TOA_WINDOW_SAMPLE_COUNT,
-            TOA_MAX_LAG_TETRA,
+            TOA_MAX_LAG_LR,
             &out->pair[TOA_PAIR_LEFT_RIGHT]) ||
         !estimate_pair(
             top,
             back,
             TOA_WINDOW_SAMPLE_COUNT,
-            TOA_MAX_LAG_TETRA,
+            TOA_MAX_LAG_TB,
             &out->pair[TOA_PAIR_TOP_BACK]) ||
         !estimate_pair(
             top,
             right,
             TOA_WINDOW_SAMPLE_COUNT,
-            TOA_MAX_LAG_TETRA,
+            TOA_MAX_LAG_TR,
             &out->pair[TOA_PAIR_TOP_RIGHT]) ||
         !estimate_pair(
             back,
             right,
             TOA_WINDOW_SAMPLE_COUNT,
-            TOA_MAX_LAG_TETRA,
+            TOA_MAX_LAG_BR,
             &out->pair[TOA_PAIR_BACK_RIGHT]))
     {
         return false;

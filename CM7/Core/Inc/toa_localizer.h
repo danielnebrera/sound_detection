@@ -42,6 +42,14 @@ typedef enum
     TOA_CONFIDENCE_HIGH
 } ToaMeasurementConfidence;
 
+/* C4.2-T: OFF by default. For experiment compile with -DC42T_ENABLE=1. */
+#ifndef C42T_ENABLE
+#define C42T_ENABLE 0U
+#endif
+#if (C42T_ENABLE != 0U) && (C42T_ENABLE != 1U)
+#error "C42T_ENABLE must be 0 or 1"
+#endif
+
 #define TOA_PEAK_CANDIDATE_COUNT 3U
 
 typedef struct
@@ -112,6 +120,11 @@ typedef struct
 bool toa_localizer_process(
     const RecorderChunkView *window,
     ToaResult *out);
+
+#if C42T_ENABLE
+/* One globally admissible peak combination, equal to current selected lags. */
+uint8_t toa_c42t_unique_selected_hypothesis(const ToaResult *result);
+#endif
 
 const char *toa_direction_text(ToaDirection direction);
 const char *toa_confidence_text(ToaMeasurementConfidence confidence);

@@ -47,6 +47,9 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#if C42T_ENABLE
+#include <math.h>
+#endif
 
 void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
@@ -77,6 +80,33 @@ static uint32_t s_conf_high_count = 0U;
 static uint32_t s_conf_medium_count = 0U;
 static uint32_t s_conf_low_count = 0U;
 static uint32_t s_track_eligible_count = 0U;
+
+#if C42T_ENABLE
+/* Experimental LOW gate: anchored only to earlier MEDIUM/HIGH
+ * measurements actually used by TRACK3D, never to target ground truth.
+ */
+static uint32_t s_c42t_anchor_seq;
+static float s_c42t_anchor_az;
+static float s_c42t_anchor_elev;
+static uint8_t s_c42t_anchor_valid;
+static uint32_t s_c42t_proposed_count;
+static uint32_t s_c42t_used_count;
+static float c42t_az_distance(float a, float b)
+{
+    float d = fabsf(a - b);
+    if (d > 180.0f) d = 360.0f - d;
+    return d;
+}
+static void c42t_reset(void)
+{
+    s_c42t_anchor_seq = 0U;
+    s_c42t_anchor_az = 0.0f;
+    s_c42t_anchor_elev = 0.0f;
+    s_c42t_anchor_valid = 0U;
+    s_c42t_proposed_count = 0U;
+    s_c42t_used_count = 0U;
+}
+#endif
 
 typedef struct
 {
@@ -1162,14 +1192,72 @@ static bool process_ready_slot(uint8_t slot)
                 toa_cycles
             );
             {
+                uint8_t effective_eligible = toa_result.track_eligible;
+#if C42T_ENABLE
+                uint8_t unique = 0U;
+                uint8_t proposed = 0U;
+                uint32_t anchor_age = 0U;
+                if ((toa_result.valid != 0U) &&
+                    (toa_result.confidence == TOA_CONFIDENCE_LOW) &&
+                    (toa_result.tetra_fit_ok != 0U))
+                {
+                    unique = toa_c42t_unique_selected_hypothesis(&toa_result);
+                    if (s_c42t_anchor_valid &&
+                        (descriptor.record_order > s_c42t_anchor_seq))
+                    {
+                        anchor_age = descriptor.record_order - s_c42t_anchor_seq;
+                    }
+                    if ((unique != 0U) && s_c42t_anchor_valid &&
+                        (anchor_age >= 1U) && (anchor_age <= 2U) &&
+                        (c42t_az_distance(toa_result.azimuth_deg,
+                                          s_c42t_anchor_az) <= 15.0f) &&
+                        (fabsf(toa_result.tetra_elevation_deg -
+                               s_c42t_anchor_elev) <= 20.0f))
+                    {
+                        proposed = 1U;
+                        effective_eligible = 1U;
+                        s_c42t_proposed_count++;
+                    }
+                }
+#endif
                 const Track3dOutput t = track3d_step(
                     descriptor.record_order,
                     toa_result.valid,
-                    toa_result.track_eligible,
+                    effective_eligible,
                     toa_result.tetra_fit_ok,
                     toa_result.azimuth_deg,
                     toa_result.tetra_elevation_deg);
                 emit_track3d(descriptor.record_order, &t);
+#if C42T_ENABLE
+                if ((toa_result.valid != 0U) &&
+                    (toa_result.confidence == TOA_CONFIDENCE_LOW))
+                {
+                    char c42t_line[192];
+                    if (proposed && t.used) s_c42t_used_count++;
+                    snprintf(c42t_line, sizeof(c42t_line),
+                             "[C42T] seq=%lu unique=%u age=%lu proposed=%u "
+                             "used=%u rejected=%u state=%s total_proposed=%lu "
+                             "total_used=%lu\r\n",
+                             (unsigned long)descriptor.record_order,
+                             (unsigned)unique, (unsigned long)anchor_age,
+                             (unsigned)proposed, (unsigned)t.used,
+                             (unsigned)t.rejected, track3d_state_text(t.state),
+                             (unsigned long)s_c42t_proposed_count,
+                             (unsigned long)s_c42t_used_count);
+                    uart_send(c42t_line);
+                }
+                /* Only a trusted MEDIUM/HIGH actually USED by TRACK3D
+                 * becomes a future anchor. Promoted LOW never anchors.
+                 */
+                if (t.used && toa_result.track_eligible &&
+                    (toa_result.confidence >= TOA_CONFIDENCE_MEDIUM))
+                {
+                    s_c42t_anchor_valid = 1U;
+                    s_c42t_anchor_seq = descriptor.record_order;
+                    s_c42t_anchor_az = toa_result.azimuth_deg;
+                    s_c42t_anchor_elev = toa_result.tetra_elevation_deg;
+                }
+#endif
             }
 
             if (toa_result.valid != 0U)
@@ -1322,6 +1410,9 @@ int main(void)
 
 
     track3d_reset();
+#if C42T_ENABLE
+    c42t_reset();
+#endif
     spatial_pcm_reset();
 
     if (!wait_for_record_command())
@@ -1330,6 +1421,12 @@ int main(void)
     }
 
 
+#if C42T_ENABLE
+    uart_send("[C42T_CONFIG] enable=1 baseline_toa=unchanged "
+              "closure=1.50 ratio=0.90 norm=0.80..1.25 "
+              "elev=0..90 max_age=2 max_az=15 max_elev=20 "
+              "anchors=medium_high_used\r\n");
+#endif
     uart_send(
         "[CAPTURE_STARTED] calibration=3 max_record=unlimited "
         "stop_at_second_boundary=1 detection=concurrent "
