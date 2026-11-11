@@ -32,16 +32,20 @@ extern "C" {
 
 /* USER CODE END Includes */
 
+extern SAI_HandleTypeDef hsai_BlockB1;
+
 extern SAI_HandleTypeDef hsai_BlockA2;
+
 extern SAI_HandleTypeDef hsai_BlockB2;
 
+/* USER CODE BEGIN Private defines */
+/* DMA handles - SAI2 A/B existentes + nuevo SAI1 B */
 extern DMA_HandleTypeDef hdma_sai2_a;
 extern DMA_HandleTypeDef hdma_sai2_b;
-
-/* USER CODE BEGIN Private defines */
-
+extern DMA_HandleTypeDef hdma_sai1_b;
 /* USER CODE END Private defines */
 
+void MX_SAI1_Init(void);
 void MX_SAI2_Init(void);
 
 /* USER CODE BEGIN Prototypes */

@@ -1,6 +1,6 @@
 /**
  * @file audio_capture.h
- * @brief Captura SAI2 A/B sincronizada para cuatro microfonos.
+ * @brief Captura SAI2 A/B y diagnostico aislado de SAI1_B (SD_C).
  *
  * Mapeo validado:
  *   ch0 -> Mic2 -> SAI2_B slot impar -> left
@@ -26,6 +26,10 @@
 #define AUDIO_SLOTS_PER_FRAME   2U
 #define AUDIO_DMA_HALVES        2U
 
+/* C1/C2: solo recepcion RAW diagnostica. No cambia AUDIO_CHANNELS. */
+#define AUDIO_CAPTURE_C_ENABLE  1U
+#define AUDIO_C_RAW_FRAMES      16U
+
 #define AUDIO_DMA_BUFFER_SIZE \
     (AUDIO_BUFFER_SIZE * AUDIO_SLOTS_PER_FRAME * AUDIO_DMA_HALVES)
 
@@ -34,6 +38,12 @@ typedef struct
     volatile uint32_t dma_a_generation[AUDIO_DMA_HALVES];
     volatile uint32_t dma_b_generation[AUDIO_DMA_HALVES];
     volatile uint32_t consumed_generation[AUDIO_DMA_HALVES];
+
+    /* Estadisticas independientes de SAI1_B. No bloquean el par A/B. */
+    volatile uint32_t dma_c_generation[AUDIO_DMA_HALVES];
+    volatile uint32_t c_error_count;
+    volatile uint32_t c_error_code;
+    volatile uint8_t c_dma_active;
 
     volatile uint32_t paired_blocks;
     volatile uint32_t error_count;
@@ -50,6 +60,11 @@ typedef struct
     uint32_t overruns;
     uint32_t pair_mismatches;
     uint32_t maximum_pair_skew;
+    uint32_t c_half_count;
+    uint32_t c_full_count;
+    uint32_t c_errors;
+    uint32_t c_error_code;
+    bool c_dma_active;
     bool fatal_error;
 } AudioCaptureStats;
 
@@ -66,5 +81,8 @@ void audio_capture_get_stats(
 extern AudioCaptureContext g_audio_ctx;
 extern uint32_t dma_buf_a[AUDIO_DMA_BUFFER_SIZE];
 extern uint32_t dma_buf_b[AUDIO_DMA_BUFFER_SIZE];
+#if AUDIO_CAPTURE_C_ENABLE
+extern uint32_t dma_buf_c[AUDIO_DMA_BUFFER_SIZE];
+#endif
 
 #endif /* AUDIO_CAPTURE_H */

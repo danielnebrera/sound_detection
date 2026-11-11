@@ -1372,6 +1372,7 @@ int main(void)
     MX_I2C1_Init();
     MX_DMA_Init();
     MX_SAI2_Init();
+    MX_SAI1_Init();
 
     if (!configure_microphone_power())
     {
