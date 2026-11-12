@@ -32,6 +32,8 @@ extern "C" {
 
 /* USER CODE END Includes */
 
+extern SAI_HandleTypeDef hsai_BlockA1;
+
 extern SAI_HandleTypeDef hsai_BlockB1;
 
 extern SAI_HandleTypeDef hsai_BlockA2;
@@ -43,6 +45,7 @@ extern SAI_HandleTypeDef hsai_BlockB2;
 extern DMA_HandleTypeDef hdma_sai2_a;
 extern DMA_HandleTypeDef hdma_sai2_b;
 extern DMA_HandleTypeDef hdma_sai1_b;
+extern DMA_HandleTypeDef hdma_sai1_a;
 /* USER CODE END Private defines */
 
 void MX_SAI1_Init(void);
