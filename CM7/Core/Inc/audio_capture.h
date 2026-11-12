@@ -26,9 +26,11 @@
 #define AUDIO_SLOTS_PER_FRAME   2U
 #define AUDIO_DMA_HALVES        2U
 
-/* C1/C2: solo recepcion RAW diagnostica. No cambia AUDIO_CHANNELS. */
+/* C/D: recepcion RAW independiente. El recorder continua en cuatro canales. */
 #define AUDIO_CAPTURE_C_ENABLE  1U
+#define AUDIO_CAPTURE_D_ENABLE  1U
 #define AUDIO_C_RAW_FRAMES      16U
+#define AUDIO_D_RAW_FRAMES      16U
 
 #define AUDIO_DMA_BUFFER_SIZE \
     (AUDIO_BUFFER_SIZE * AUDIO_SLOTS_PER_FRAME * AUDIO_DMA_HALVES)
@@ -44,6 +46,12 @@ typedef struct
     volatile uint32_t c_error_count;
     volatile uint32_t c_error_code;
     volatile uint8_t c_dma_active;
+
+    /* SAI1_A / DMA1_Stream3: diagnostico independiente de A/B/C. */
+    volatile uint32_t dma_d_generation[AUDIO_DMA_HALVES];
+    volatile uint32_t d_error_count;
+    volatile uint32_t d_error_code;
+    volatile uint8_t d_dma_active;
 
     volatile uint32_t paired_blocks;
     volatile uint32_t error_count;
@@ -65,6 +73,11 @@ typedef struct
     uint32_t c_errors;
     uint32_t c_error_code;
     bool c_dma_active;
+    uint32_t d_half_count;
+    uint32_t d_full_count;
+    uint32_t d_errors;
+    uint32_t d_error_code;
+    bool d_dma_active;
     bool fatal_error;
 } AudioCaptureStats;
 
@@ -83,6 +96,9 @@ extern uint32_t dma_buf_a[AUDIO_DMA_BUFFER_SIZE];
 extern uint32_t dma_buf_b[AUDIO_DMA_BUFFER_SIZE];
 #if AUDIO_CAPTURE_C_ENABLE
 extern uint32_t dma_buf_c[AUDIO_DMA_BUFFER_SIZE];
+#endif
+#if AUDIO_CAPTURE_D_ENABLE
+extern uint32_t dma_buf_d[AUDIO_DMA_BUFFER_SIZE];
 #endif
 
 #endif /* AUDIO_CAPTURE_H */

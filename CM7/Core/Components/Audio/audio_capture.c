@@ -26,6 +26,14 @@ static uint32_t s_rawc_first[AUDIO_C_RAW_FRAMES][AUDIO_SLOTS_PER_FRAME];
 static volatile uint8_t s_rawc_saved = 0U;
 #endif
 
+#if AUDIO_CAPTURE_D_ENABLE
+/* 8 KiB dedicados a D (SAI1_A, PB2) en RAM D2, sin pasar al recorder. */
+__attribute__((section(".RAM_D2_bss"), aligned(32)))
+uint32_t dma_buf_d[AUDIO_DMA_BUFFER_SIZE];
+static uint32_t s_rawd_first[AUDIO_D_RAW_FRAMES][AUDIO_SLOTS_PER_FRAME];
+static volatile uint8_t s_rawd_saved = 0U;
+#endif
+
 AudioCaptureContext g_audio_ctx = {0};
 
 extern SAI_HandleTypeDef hsai_BlockA2;
@@ -33,6 +41,10 @@ extern SAI_HandleTypeDef hsai_BlockB2;
 #if AUDIO_CAPTURE_C_ENABLE
 extern SAI_HandleTypeDef hsai_BlockB1;
 extern DMA_HandleTypeDef hdma_sai1_b;
+#endif
+#if AUDIO_CAPTURE_D_ENABLE
+extern SAI_HandleTypeDef hsai_BlockA1;
+extern DMA_HandleTypeDef hdma_sai1_a;
 #endif
 
 volatile uint32_t sai_half_count = 0U;
@@ -42,6 +54,13 @@ volatile uint32_t block_b_full_count = 0U;
 #if AUDIO_CAPTURE_C_ENABLE
 volatile uint32_t block_c_half_count = 0U;
 volatile uint32_t block_c_full_count = 0U;
+#endif
+#if AUDIO_CAPTURE_D_ENABLE
+volatile uint32_t block_d_half_count = 0U;
+volatile uint32_t block_d_full_count = 0U;
+static volatile uint32_t s_ddiag_error_callbacks = 0U;
+static uint32_t s_ddiag_start_result = 0xFFFFFFFFU;
+static uint32_t s_ddiag_stop_result = 0xFFFFFFFFU;
 #endif
 
 
@@ -371,6 +390,72 @@ static void rawc_emit_after_stop(const AudioCaptureContext *ctx)
 }
 #endif /* AUDIO_CAPTURE_C_ENABLE */
 
+#if AUDIO_CAPTURE_D_ENABLE
+/* Callback: copiar una sola instantanea de la primera mitad completada. */
+static void rawd_snapshot_from_isr(uint8_t half)
+{
+    if ((half != 0U) || (s_rawd_saved != 0U))
+    {
+        return;
+    }
+    for (uint32_t f = 0U; f < AUDIO_D_RAW_FRAMES; ++f)
+    {
+        const uint32_t i = f * AUDIO_SLOTS_PER_FRAME;
+        s_rawd_first[f][0] = dma_buf_d[i];
+        s_rawd_first[f][1] = dma_buf_d[i + 1U];
+    }
+    __DMB();
+    s_rawd_saved = 1U;
+}
+
+/* Solo se emite despues del STOP: no se utiliza UART desde la ISR. */
+static void audio_ddiag_emit_after_stop(const AudioCaptureContext *ctx)
+{
+    char msg[192];
+    (void)snprintf(msg, sizeof(msg),
+        "[D_STATUS] start=%lu stop=%lu callback_err=%lu d_errors=%lu "
+        "d_error_code=%08lX d_half=%lu d_full=%lu a_half=%lu b_half=%lu "
+        "c_half=%lu irq=%lu\r\n",
+        (unsigned long)s_ddiag_start_result,
+        (unsigned long)s_ddiag_stop_result,
+        (unsigned long)s_ddiag_error_callbacks,
+        (unsigned long)ctx->d_error_count,
+        (unsigned long)ctx->d_error_code,
+        (unsigned long)block_d_half_count,
+        (unsigned long)block_d_full_count,
+        (unsigned long)ctx->dma_a_generation[0],
+        (unsigned long)ctx->dma_b_generation[0],
+        (unsigned long)ctx->dma_c_generation[0],
+        (unsigned long)NVIC_GetEnableIRQ(DMA1_Stream3_IRQn));
+    audio_recorder_send_text(msg);
+
+    (void)snprintf(msg, sizeof(msg),
+        "[D_RAW_BEGIN] saved=%u frames=%u NDTR=%lu "
+        "SAI_STATE=%lu SAI_ERR=%08lX DMA_STATE=%lu DMA_ERR=%08lX\r\n",
+        (unsigned)s_rawd_saved, (unsigned)AUDIO_D_RAW_FRAMES,
+        (unsigned long)DMA1_Stream3->NDTR,
+        (unsigned long)HAL_SAI_GetState(&hsai_BlockA1),
+        (unsigned long)HAL_SAI_GetError(&hsai_BlockA1),
+        (unsigned long)HAL_DMA_GetState(&hdma_sai1_a),
+        (unsigned long)HAL_DMA_GetError(&hdma_sai1_a));
+    audio_recorder_send_text(msg);
+
+    if (s_rawd_saved != 0U)
+    {
+        for (uint32_t f = 0U; f < AUDIO_D_RAW_FRAMES; ++f)
+        {
+            (void)snprintf(msg, sizeof(msg),
+                "[D_RAW_FRAME] f=%lu slot0=%08lX slot1=%08lX\r\n",
+                (unsigned long)f,
+                (unsigned long)s_rawd_first[f][0],
+                (unsigned long)s_rawd_first[f][1]);
+            audio_recorder_send_text(msg);
+        }
+    }
+    audio_recorder_send_text("[D_RAW_END]\r\n");
+}
+#endif
+
 static uint32_t absolute_difference_u32(uint32_t a, uint32_t b)
 {
     return (a >= b) ? (a - b) : (b - a);
@@ -473,6 +558,16 @@ int audio_capture_init(AudioCaptureContext *ctx)
     s_cdiag_stop_errors = 0U;
 #endif
     reset_context(ctx);
+#if AUDIO_CAPTURE_D_ENABLE
+    memset(dma_buf_d, 0, sizeof(dma_buf_d));
+    memset(s_rawd_first, 0, sizeof(s_rawd_first));
+    s_rawd_saved = 0U;
+    block_d_half_count = 0U;
+    block_d_full_count = 0U;
+    s_ddiag_error_callbacks = 0U;
+    s_ddiag_start_result = 0xFFFFFFFFU;
+    s_ddiag_stop_result = 0xFFFFFFFFU;
+#endif
 #if AUDIO_RAWB_DIAG_ENABLE
     memset(s_rawb_events, 0, sizeof(s_rawb_events));
     memset(s_rawb_baseline, 0, sizeof(s_rawb_baseline));
@@ -515,6 +610,24 @@ int audio_capture_start(AudioCaptureContext *ctx)
     ctx->c_dma_active = 1U;
 #endif
 
+#if AUDIO_CAPTURE_D_ENABLE
+    /* D (SAI1_A) tambien debe quedar armado antes del maestro SAI2_A. */
+    const HAL_StatusTypeDef start_d = HAL_SAI_Receive_DMA(
+        &hsai_BlockA1, (uint8_t *)dma_buf_d, AUDIO_DMA_BUFFER_SIZE);
+    s_ddiag_start_result = (uint32_t)start_d;
+    if (start_d != HAL_OK)
+    {
+        ctx->d_error_count++;
+        ctx->d_error_code |= HAL_SAI_GetError(&hsai_BlockA1);
+#if AUDIO_CAPTURE_C_ENABLE
+        (void)HAL_SAI_DMAStop(&hsai_BlockB1);
+        ctx->c_dma_active = 0U;
+#endif
+        return -5;
+    }
+    ctx->d_dma_active = 1U;
+#endif
+
     /* B es esclavo: se arma antes de que A genere SCK/FS. */
     if (HAL_SAI_Receive_DMA(
             &hsai_BlockB2,
@@ -524,6 +637,10 @@ int audio_capture_start(AudioCaptureContext *ctx)
 #if AUDIO_CAPTURE_C_ENABLE
         (void)HAL_SAI_DMAStop(&hsai_BlockB1);
         ctx->c_dma_active = 0U;
+#endif
+#if AUDIO_CAPTURE_D_ENABLE
+        (void)HAL_SAI_DMAStop(&hsai_BlockA1);
+        ctx->d_dma_active = 0U;
 #endif
         ctx->error_count++;
         return -2;
@@ -540,6 +657,10 @@ int audio_capture_start(AudioCaptureContext *ctx)
 #if AUDIO_CAPTURE_C_ENABLE
         (void)HAL_SAI_DMAStop(&hsai_BlockB1);
         ctx->c_dma_active = 0U;
+#endif
+#if AUDIO_CAPTURE_D_ENABLE
+        (void)HAL_SAI_DMAStop(&hsai_BlockA1);
+        ctx->d_dma_active = 0U;
 #endif
         ctx->error_count++;
         return -3;
@@ -580,6 +701,21 @@ int audio_capture_stop(AudioCaptureContext *ctx)
     audio_cdiag_take(&s_cdiag_after_stop);
     audio_cdiag_emit();
     rawc_emit_after_stop(ctx);
+#endif
+#if AUDIO_CAPTURE_D_ENABLE
+    HAL_StatusTypeDef result_d = HAL_OK;
+    if (ctx->d_dma_active != 0U)
+    {
+        result_d = HAL_SAI_DMAStop(&hsai_BlockA1);
+        ctx->d_dma_active = 0U;
+        if (result_d != HAL_OK)
+        {
+            ctx->d_error_count++;
+            ctx->d_error_code |= HAL_SAI_GetError(&hsai_BlockA1);
+        }
+    }
+    s_ddiag_stop_result = (uint32_t)result_d;
+    audio_ddiag_emit_after_stop(ctx);
 #endif
 
     if ((result_a != HAL_OK) || (result_b != HAL_OK))
@@ -627,6 +763,19 @@ void audio_capture_get_stats(
     stats->c_error_code = 0U;
     stats->c_dma_active = false;
 #endif
+#if AUDIO_CAPTURE_D_ENABLE
+    stats->d_half_count = block_d_half_count;
+    stats->d_full_count = block_d_full_count;
+    stats->d_errors = ctx->d_error_count;
+    stats->d_error_code = ctx->d_error_code;
+    stats->d_dma_active = (ctx->d_dma_active != 0U);
+#else
+    stats->d_half_count = 0U;
+    stats->d_full_count = 0U;
+    stats->d_errors = 0U;
+    stats->d_error_code = 0U;
+    stats->d_dma_active = false;
+#endif
     stats->fatal_error = (ctx->fatal_error != 0U);
 }
 
@@ -651,6 +800,14 @@ void HAL_SAI_RxHalfCpltCallback(SAI_HandleTypeDef *hsai)
         rawc_snapshot_from_isr(0U);
     }
 #endif
+#if AUDIO_CAPTURE_D_ENABLE
+    else if (hsai == &hsai_BlockA1)
+    {
+        block_d_half_count++;
+        g_audio_ctx.dma_d_generation[0]++;
+        rawd_snapshot_from_isr(0U);
+    }
+#endif
 }
 
 void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai)
@@ -673,10 +830,27 @@ void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai)
         g_audio_ctx.dma_c_generation[1]++;
     }
 #endif
+#if AUDIO_CAPTURE_D_ENABLE
+    else if (hsai == &hsai_BlockA1)
+    {
+        block_d_full_count++;
+        g_audio_ctx.dma_d_generation[1]++;
+    }
+#endif
 }
 
 void HAL_SAI_ErrorCallback(SAI_HandleTypeDef *hsai)
 {
+#if AUDIO_CAPTURE_D_ENABLE
+    if (hsai == &hsai_BlockA1)
+    {
+        /* Fallo D no detiene ni altera la ruta A/B ni la diagnostica C. */
+        g_audio_ctx.d_error_count++;
+        s_ddiag_error_callbacks++;
+        g_audio_ctx.d_error_code |= HAL_SAI_GetError(hsai);
+        return;
+    }
+#endif
 #if AUDIO_CAPTURE_C_ENABLE
     if (hsai == &hsai_BlockB1)
     {
