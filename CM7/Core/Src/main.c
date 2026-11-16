@@ -16,6 +16,8 @@
 #include "i2c.h"
 #include "sai.h"
 #include "usart.h"
+#include "fdcan.h"
+#include "can_telemetry.h"
 #include "gpio.h"
 
 #include "audio_capture.h"
@@ -1131,6 +1133,7 @@ static bool process_ready_slot(uint8_t slot)
                 const Track3dOutput t = track3d_step(
                     descriptor.record_order, 0U, 0U, 0U, 0.0f, 0.0f);
                 emit_track3d(descriptor.record_order, &t);
+                can_telemetry_publish(&result, &t);
             }
         }
         else
@@ -1228,6 +1231,7 @@ static bool process_ready_slot(uint8_t slot)
                     toa_result.azimuth_deg,
                     toa_result.tetra_elevation_deg);
                 emit_track3d(descriptor.record_order, &t);
+                can_telemetry_publish(&result, &t);
 #if C42T_ENABLE
                 if ((toa_result.valid != 0U) &&
                     (toa_result.confidence == TOA_CONFIDENCE_LOW))
@@ -1373,6 +1377,10 @@ int main(void)
     MX_DMA_Init();
     MX_SAI2_Init();
     MX_SAI1_Init();
+
+    /* CAN: generated peripheral init, then non-blocking telemetry start. */
+    MX_FDCAN1_Init();
+    (void)can_telemetry_start(&hfdcan1);
 
     if (!configure_microphone_power())
     {
@@ -1538,6 +1546,19 @@ int main(void)
 
     emit_detection_profile();
 
+    /* CAN diagnostics only after capture has stopped. */
+    {
+        CanTelemetryStats can_stats = {0};
+        char can_message[160];
+        can_telemetry_get_stats(&can_stats);
+        snprintf(can_message, sizeof(can_message),
+                 "[CAN_SUMMARY] started=%u queued=%lu fifo_full=%lu errors=%lu\r\n",
+                 (unsigned)can_stats.started,
+                 (unsigned long)can_stats.sent,
+                 (unsigned long)can_stats.skipped_fifo_full,
+                 (unsigned long)can_stats.hal_errors);
+        uart_send(can_message);
+    }
 
     {
         char message[256];

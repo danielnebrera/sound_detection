@@ -459,7 +459,7 @@ STMicroelectronics.X-CUBE-AI.10.2.0_M7.ModelCompression-149df87b5ec0a143e399f0c2
 STMicroelectronics.X-CUBE-AI.10.2.0_M7.ModelFlashOccupation-149df87b5ec0a143e399f0c257c572e418cd56b8fbc87dadfb241f947aae13cf=589088
 STMicroelectronics.X-CUBE-AI.10.2.0_M7.ModelHashList=149df87b5ec0a143e399f0c257c572e418cd56b8fbc87dadfb241f947aae13cf
 STMicroelectronics.X-CUBE-AI.10.2.0_M7.ModelKind-149df87b5ec0a143e399f0c257c572e418cd56b8fbc87dadfb241f947aae13cf=TFLITE
-STMicroelectronics.X-CUBE-AI.10.2.0_M7.ModelMacc-149df87b5ec0a143e399f0c257c572e418cd56b8fbc87dadfb241f947aae13cf=0
+STMicroelectronics.X-CUBE-AI.10.2.0_M7.ModelMacc-149df87b5ec0a143e399f0c257c572e418cd56b8fbc87dadfb241f947aae13cf=-1
 STMicroelectronics.X-CUBE-AI.10.2.0_M7.ModelName-149df87b5ec0a143e399f0c257c572e418cd56b8fbc87dadfb241f947aae13cf=network
 STMicroelectronics.X-CUBE-AI.10.2.0_M7.ModelNameList=network
 STMicroelectronics.X-CUBE-AI.10.2.0_M7.ModelRamOccupation-149df87b5ec0a143e399f0c257c572e418cd56b8fbc87dadfb241f947aae13cf=143872
